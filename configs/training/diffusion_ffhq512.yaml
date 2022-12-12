@@ -1,0 +1,55 @@
+model:
+  target: models.unet.UNetModel
+  params:
+    image_size: 512
+    in_channels: 3
+    model_channels: 32
+    out_channels: 6
+    attention_resolutions: [32, 16, 8]
+    dropout: 0
+    channel_mult: [1, 2, 4, 8, 8, 16, 16]
+    num_res_blocks: [1, 2, 2, 2, 2, 3, 4]
+    conv_resample: True
+    dims: 2
+    use_fp16: False
+    num_head_channels: 64
+    use_scale_shift_norm: True
+    resblock_updown: False
+    use_new_attention_order: False
+
+diffusion:
+  target: models.script_util.create_gaussian_diffusion
+  params:
+    steps: 1000
+    learn_sigma: True
+    sigma_small: False
+    noise_schedule: linear
+    use_kl: False
+    predict_xstart: False
+    rescale_timesteps: False
+    rescale_learned_sigmas: True
+    timestep_respacing: ""
+
+train:
+  lr: 1e-4
+  batch: [32, 4]   # batchsize for training and validation
+  microbatch: 8
+  use_fp16: False
+  num_workers: 16
+  prefetch_factor: 2
+  iterations: 800000
+  weight_decay: 0
+  scheduler: step   # step or cosin
+  milestones: [10000, 800000]
+  ema_rates: [0.999]
+  save_freq: 10000
+  val_freq: 5000
+  log_freq: [1000, 2000]
+
+data:
+  train:
+    type: face
+    params:
+      ffhq_txt: ./datapipe/files_txt/ffhq512.txt
+      out_size: 512
+      transform_type: face

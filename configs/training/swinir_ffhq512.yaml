@@ -1,0 +1,66 @@
+model:
+  target: models.swinir.SwinIR
+  params:
+    img_size: 64
+    patch_size: 1
+    in_chans: 3
+    embed_dim: 180
+    depths: [6, 6, 6, 6, 6, 6, 6, 6]
+    num_heads: [6, 6, 6, 6, 6, 6, 6, 6]
+    window_size: 8
+    mlp_ratio: 2
+    sf: 8
+    img_range: 1.0
+    upsampler: "nearest+conv"
+    resi_connection: "1conv"
+    unshuffle: True
+
+train:
+  lr: 1e-4
+  lr_min: 5e-6
+  batch: [16, 4]   # batchsize for training and validation
+  microbatch: 2
+  num_workers: 8
+  prefetch_factor: 2
+  iterations: 800000
+  weight_decay: 0
+  save_freq: 20000
+  val_freq: 20000
+  log_freq: [100, 2000, 50]
+
+data:
+  train:
+    type: gfpgan 
+    params:
+      files_txt: ./datapipe/files_txt/ffhq512_train.txt
+      io_backend:
+        type: disk
+   
+      use_hflip: true
+      mean: [0.0, 0.0, 0.0]
+      std: [1.0, 1.0, 1.0]
+      out_size: 512
+   
+      blur_kernel_size: 41
+      kernel_list: ['iso', 'aniso']
+      kernel_prob: [0.5, 0.5]
+      blur_sigma: [0.1, 15]
+      downsample_range: [0.8, 32]
+      noise_range: [0, 20]
+      jpeg_range: [30, 100]
+   
+      color_jitter_prob: ~
+      color_jitter_pt_prob: ~
+      gray_prob: 0.01
+      gt_gray: True
+
+      need_gt_path: False
+  val:
+    type: folder 
+    params:
+      dir_path: /mnt/vdb/IRDiff/Face/testing_data/celeba512_lq
+      dir_path_gt: /mnt/vdb/IRDiff/Face/testing_data/celeba512_hq
+      ext: png
+      need_gt_path: False
+      length: ~
+
