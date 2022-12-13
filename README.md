@@ -28,17 +28,17 @@ conda activate taming
 ```
 
 ## Inference
-####:boy: Face image restoration (cropped and aligned)
+#### :boy: Face image restoration (cropped and aligned)
 ```
 python inference_difface.py --aligned --in_path [image folder/image path] --out_path [result folder] --gpu_id [gpu index]
 ```
-####:couple: Whole image enhancement
+#### :couple: Whole image enhancement
 ```
 python inference_difface.py --in_path [image folder/image path] --out_path [result folder] --gpu_id [gpu index]
 ```
 
 ## Training
-####:turtle: Prepare data
+#### :turtle: Prepare data
 1. Download the [FFHQ](https://github.com/NVlabs/ffhq-dataset) dataset, and resize them into size 512x512.
 ```
 python datapipe/prepare/face/big2small_face.py --face_dir [Face folder(1024x1024)] --save_dir [Saving folder] --pch_size 512 
@@ -51,11 +51,11 @@ python datapipe/prepare/face/split_train_val.py --face_dir [Face folder(512x512)
 ```
 python datapipe/prepare/face/make_testing_data.py --files_txt datapipe/files_txt/ffhq512.txt --save_dir [Saving folder]  
 ```
-####:dolphin: Train diffusion model
+#### :dolphin: Train diffusion model
 ```
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 --nnodes=1 main_diffusion.py --cfg_path configs/training/diffsuion_ffhq512.yaml --save_dir [Logging Folder]  
 ```
-####:whale: Train diffused estimator (SwinIR)
+#### :whale: Train diffused estimator (SwinIR)
 ```
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 --nnodes=1 main_sr.py --cfg_path configs/training/swinir_ffhq512.yaml --save_dir [Logging Folder]  
 ```
