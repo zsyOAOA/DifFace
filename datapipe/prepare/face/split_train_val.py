@@ -13,7 +13,7 @@ parser.add_argument('--face_dir', default='/home/jupyter/data/FFHQ/images512x512
 parser.add_argument('--prefix', default='ffhq', type=str, help="Image format of the HR face images")
 parser.add_argument('--num_val', default=500, type=int, help="Ratio for Validation set")
 parser.add_argument('--seed', default=1234, type=int, help="Random seed")
-parser.add_argument('--im_size', default=256, type=int, help="Random seed")
+parser.add_argument('--im_size', default=512, type=int, help="Random seed")
 args = parser.parse_args()
 
 base_dir = Path(__file__).resolve().parents[2] / 'files_txt'

@@ -32,7 +32,7 @@ def main():
             "--started_timesteps",
             type=int,
             default='100',
-            help='Started timestep for DifFace, (Default:100)',
+            help='Started timestep for DifFace, parameter N in our paper (Default:100)',
             )
     parser.add_argument(
             "--aligned",
@@ -49,7 +49,7 @@ def main():
             "--timestep_respacing",
             type=str,
             default='250',
-            help='Accelerating sampling steps for Improved DDPM, only in pixel space',
+            help='Sampling steps for Improved DDPM, parameter T in out paper (default 250)',
             )
     parser.add_argument(
             "--in_path",

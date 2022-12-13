@@ -14,6 +14,7 @@ model:
     upsampler: "nearest+conv"
     resi_connection: "1conv"
     unshuffle: True
+    unshuffle_scale: 8
 
 train:
   lr: 1e-4
