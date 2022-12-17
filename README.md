@@ -2,6 +2,8 @@
 
 [Zongsheng Yue](https://zsyoaoa.github.io/), [Chen Change Loy](https://www.mmlab-ntu.com/person/ccloy/) 
 
+[Paper](https://arxiv.org/abs/2212.06512) | [![Hugging Face](https://img.shields.io/badge/Demo-Hugging%20Face-blue)](https://huggingface.co/spaces/OAOA/DifFace) | ![visitors](https://visitor-badge.laobi.icu/badge?page_id=zsyOAOA/DifFace) 
+
 <img src="assets/DifFace_Framework.png" width="800px"/>
 
 :star: If DifFace is helpful to your images or projects, please help star this repo. Thanks! :hugs: 
