@@ -71,6 +71,8 @@ def main():
     configs = OmegaConf.load(cfg_path)
     configs.gpu_id = args.gpu_id
     configs.aligned = args.aligned
+    assert args.started_timesteps < int(args.timestep_respacing)
+    configs.diffusion.params.timestep_respacing = args.timestep_respacing
 
     # prepare the checkpoint
     if not Path(configs.model.ckpt_path).exists():
