@@ -2,7 +2,9 @@
 
 [Zongsheng Yue](https://zsyoaoa.github.io/), [Chen Change Loy](https://www.mmlab-ntu.com/person/ccloy/) 
 
-[Paper](https://arxiv.org/abs/2212.06512) | [![Hugging Face](https://img.shields.io/badge/Demo-Hugging%20Face-blue)](https://huggingface.co/spaces/OAOA/DifFace) | ![visitors](https://visitor-badge.laobi.icu/badge?page_id=zsyOAOA/DifFace) 
+[Paper](https://arxiv.org/abs/2212.06512)
+
+<a href="https://colab.research.google.com/drive/1BNtoPPRuJwNDvqfwDOOmD9XJyF05Zh4m?usp=sharing"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="google colab logo"></a> [![Hugging Face](https://img.shields.io/badge/Demo-Hugging%20Face-blue)](https://huggingface.co/spaces/OAOA/DifFace) ![visitors](https://visitor-badge.laobi.icu/badge?page_id=zsyOAOA/DifFace) 
 
 <img src="assets/DifFace_Framework.png" width="800px"/>
 
