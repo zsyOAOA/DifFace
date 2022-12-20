@@ -283,7 +283,7 @@ class TrainerSR(TrainerBase):
     def __init__(self, configs):
         super().__init__(configs)
 
-    def mse_loss(self, pred, target):
+    def loss_fun(self, pred, target):
         return F.mse_loss(pred, target, reduction='mean')
 
     @torch.no_grad()
@@ -489,10 +489,10 @@ class TrainerSR(TrainerBase):
             last_batch = (jj+micro_batchsize >= current_batchsize)
             hq_pred = self.model(micro_data['lq'])
             if last_batch or self.num_gpus <= 1:
-                loss = self.mse_loss(hq_pred, micro_data['gt']) / hq_pred.shape[0]
+                loss = self.loss_fun(hq_pred, micro_data['gt']) / hq_pred.shape[0]
             else:
                 with self.model.no_sync():
-                    loss = self.mse_loss(hq_pred, micro_data['gt']) / hq_pred.shape[0]
+                    loss = self.loss_fun(hq_pred, micro_data['gt']) / hq_pred.shape[0]
             loss /= num_grad_accumulate
             loss.backward()
 
