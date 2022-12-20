@@ -20,7 +20,7 @@ train:
   lr: 1e-4
   lr_min: 5e-6
   batch: [16, 4]   # batchsize for training and validation
-  microbatch: 2
+  microbatch: 4
   num_workers: 8
   prefetch_factor: 2
   iterations: 800000
