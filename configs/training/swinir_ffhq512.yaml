@@ -27,13 +27,13 @@ train:
   weight_decay: 0
   save_freq: 20000
   val_freq: 20000
-  log_freq: [100, 2000, 50]
+  log_freq: [100, 2000, 100]
 
 data:
   train:
     type: gfpgan 
     params:
-      files_txt: ./datapipe/files_txt/ffhq512_train.txt
+      files_txt: ./datapipe/files_txt/ffhq512.txt
       io_backend:
         type: disk
    
@@ -59,9 +59,11 @@ data:
   val:
     type: folder 
     params:
-      dir_path: /mnt/vdb/IRDiff/Face/testing_data/celeba512_lq
-      dir_path_gt: /mnt/vdb/IRDiff/Face/testing_data/celeba512_hq
+      dir_path: /mnt/lustre/zsyue/disk/IRDiff/Face/testing_data/syn_iclr_celeba512/lq
+      dir_path_gt: /mnt/lustre/zsyue/disk/IRDiff/Face/testing_data/syn_iclr_celeba512/hq
       ext: png
       need_gt_path: False
       length: ~
+      mean: 0.0
+      std: 1.0
 
