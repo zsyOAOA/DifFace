@@ -284,7 +284,7 @@ class TrainerSR(TrainerBase):
         super().__init__(configs)
 
     def loss_fun(self, pred, target):
-        return F.mse_loss(pred, target, reduction='mean')
+        return F.mse_loss(pred, target, reduction='sum')
 
     @torch.no_grad()
     def _dequeue_and_enqueue(self):
@@ -549,7 +549,7 @@ class TrainerSR(TrainerBase):
             psnr_mean = lpips_mean = 0
             total_iters = math.ceil(len(self.datasets[phase]) / self.configs.train.batch[1])
             for ii, data in enumerate(self.dataloaders[phase]):
-                data = self.prepare_data(data)
+                data = self.prepare_data(data, real_esrgan=(self.configs.data.val.type=='realesrgan'))
                 with torch.no_grad():
                     hq_pred = self.model(data['lq'])
                     hq_pred.clamp_(0.0, 1.0)
