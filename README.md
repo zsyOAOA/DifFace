@@ -11,6 +11,8 @@
 :star: If DifFace is helpful to your images or projects, please help star this repo. Thanks! :hugs: 
 
 ## Update
+- **2022.12.19**: Add Colab demo <a href="https://colab.research.google.com/drive/1BNtoPPRuJwNDvqfwDOOmD9XJyF05Zh4m?usp=sharing"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="google colab logo"></a>. 
+- **2022.12.17**: Add the [![Hugging Face](https://img.shields.io/badge/Demo-Hugging%20Face-blue)](https://huggingface.co/spaces/OAOA/DifFace).
 - **2022.12.13**: Create this repo.
 
 ## Applications
