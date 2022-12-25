@@ -251,13 +251,13 @@ def set_scale_and_out_sz(in_shape, out_shape, scale_factors, fw):
 
 
 def get_projected_grid(in_sz, out_sz, scale_factor, fw, device=None):
-    # we start by having the ouput coordinates which are just integer locations
+    # we start by having the output coordinates which are just integer locations
     out_coordinates = fw.arange(out_sz)
 
     # if using torch we need to match the grid tensor device to the input device
     out_coordinates = fw_set_device(out_coordinates, device, fw)
 
-    # This is projecting the ouput pixel locations in 1d to the input tensor,
+    # This is projecting the output pixel locations in 1d to the input tensor,
     # as non-integer locations.
     # the following fomrula is derived in the paper
     # "From Discrete to Continuous Convolutions" by Shocher et al.
