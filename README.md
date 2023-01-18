@@ -30,7 +30,7 @@ A suitable [conda](https://conda.io/) environment named `DifFace` can be created
 
 ```
 conda env create -f environment.yaml
-conda activate taming
+conda activate DifFace
 ```
 
 ## Inference
