@@ -148,7 +148,8 @@ class TrainerBase:
             # iterations
             self.iters_start = ckpt['iters_start']
             # learning rate scheduler
-            for ii in range(self.iters_start): self.adjust_lr(ii)
+            for ii in range(self.iters_start):
+                self.adjust_lr(ii)
             if self.rank == 0:
                 self.log_step = ckpt['log_step']
                 self.log_step_img = ckpt['log_step_img']
@@ -268,9 +269,9 @@ class TrainerBase:
     def training_step(self, data):
         pass
 
-    def adjust_lr(self):
-        if hasattr(self, 'lr_sheduler'):
-            self.lr_sheduler.step()
+    def adjust_lr(self, current_iters=None):
+        assert hasattr(self, 'lr_sheduler'):
+        self.lr_sheduler.step()
 
     def save_ckpt(self):
         ckpt_path = self.ckpt_dir / 'model_{:d}.pth'.format(self.current_iters)
@@ -739,13 +740,14 @@ class TrainerDiffusionFace(TrainerBase):
                 for key, value in ema_state.items():
                     ema_state[key].mul_(rate).add_(source_state[key].detach().data, alpha=1-rate)
 
-    def adjust_lr(self, ii):
+    def adjust_lr(self, current_iters=None):
         base_lr = self.configs.train.lr
         linear_steps = self.configs.train.milestones[0]
-        if ii <= linear_steps:
+        current_iters = self.current_iters if current_iters is None else current_iters
+        if current_iters <= linear_steps:
             for params_group in self.optimizer.param_groups:
-                params_group['lr'] = (ii / linear_steps) * base_lr
-        elif ii in self.configs.train.milestones:
+                params_group['lr'] = (current_iters / linear_steps) * base_lr
+        elif current_iters in self.configs.train.milestones:
             for params_group in self.optimizer.param_groups:
                 params_group['lr'] *= 0.5
 
