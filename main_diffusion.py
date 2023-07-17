@@ -14,7 +14,6 @@ def get_parser(**parser_kwargs):
                                                       help="resume from the save_dir or checkpoint")
     parser.add_argument("--cfg_path", type=str, default="./configs/inpainting_debug.yaml",
                                                                         help="Configs of yaml file")
-    parser.add_argument("--gpu_id", type=str, default='', help="GPU Index, e.g., 025")
     parser.add_argument("--seed", type=int, default=10000, help="Random seed")
     args = parser.parse_args()
 

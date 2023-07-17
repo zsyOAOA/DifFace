@@ -67,13 +67,7 @@ class TrainerBase:
         self.resume_from_ckpt()
 
     def setup_dist(self):
-        if self.configs.gpu_id:
-            gpu_id = self.configs.gpu_id
-            num_gpus = len(gpu_id)
-            os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-            os.environ['CUDA_VISIBLE_DEVICES'] = ','.join([gpu_id[ii] for ii in range(num_gpus)])
-        else:
-            num_gpus = torch.cuda.device_count()
+        num_gpus = torch.cuda.device_count()
 
         if num_gpus > 1:
             if mp.get_start_method(allow_none=True) is None:
