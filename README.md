@@ -11,6 +11,7 @@
 :star: If DifFace is helpful to your images or projects, please help star this repo. Thanks! :hugs: 
 
 ## Update
+- **2023.12.11**: Add the code for image inpainting.
 - **2022.12.19**: Add Colab demo <a href="https://colab.research.google.com/drive/1BNtoPPRuJwNDvqfwDOOmD9XJyF05Zh4m?usp=sharing"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="google colab logo"></a>. 
 - **2022.12.17**: Add the [![Hugging Face](https://img.shields.io/badge/Demo-Hugging%20Face-blue)](https://huggingface.co/spaces/OAOA/DifFace).
 - **2022.12.13**: Create this repo.
@@ -24,6 +25,10 @@
 ### :point_right: Face Restoration
 <img src="testdata/cropped_faces/0368.png" height="200px" width="200px"/><img src="assets/0368.png" height="200px" width="200px"/> <img src="testdata/cropped_faces/0885.png" height="200px" width="200px"/><img src="assets/0885.png" height="200px" width="200px"/>
 <img src="testdata/cropped_faces/0729.png" height="200px" width="200px"/><img src="assets/0729.png" height="200px" width="200px"/> <img src="testdata/cropped_faces/0934.png" height="200px" width="200px"/><img src="assets/0934.png" height="200px" width="200px"/>
+
+### :point_right: Face Inpainting
+<img src="assets/269_mark.png" height="200px" width="200px"/><img src="assets/269.png" height="200px" width="200px"/> <img src="assets/321_mark.png" height="200px" width="200px"/><img src="assets/321.png" height="200px" width="200px"/>
+<img src="assets/362_mark.png" height="200px" width="200px"/><img src="assets/362.png" height="200px" width="200px"/> <img src="assets/5452_mark.png" height="200px" width="200px"/><img src="assets/5452.png" height="200px" width="200px"/>
 
 ## Requirements
 A suitable [conda](https://conda.io/) environment named `DifFace` can be created and activated with:
