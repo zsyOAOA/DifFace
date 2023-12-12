@@ -1,5 +1,9 @@
+trainer:
+  target: trainer.TrainerSR
+
 model:
   target: models.swinir.SwinIR
+  ckpt_path: ~
   params:
     img_size: 64
     patch_size: 1
@@ -17,23 +21,26 @@ model:
     unshuffle_scale: 8
 
 train:
-  lr: 1e-4
+  lr: 5e-5
   lr_min: 5e-6
-  batch: [16, 4]   # batchsize for training and validation
-  microbatch: 4
-  num_workers: 8
+  batch: [32, 16]   # batchsize for training and validation
+  microbatch: 8
+  num_workers: 32
   prefetch_factor: 2
-  iterations: 800000
+  iterations: 300000
   weight_decay: 0
-  save_freq: 20000
-  val_freq: 20000
-  log_freq: [100, 2000, 100]
+  save_freq: 10000
+  val_freq: ${train.save_freq}
+  log_freq: [100, 2000, 10]
+  loss_type: L1
+  tf_logging: True
+  local_logging: True
 
 data:
   train:
     type: gfpgan 
     params:
-      files_txt: ./datapipe/files_txt/ffhq512.txt
+      files_txt: /mnt/lustre/share/zsyue/data/FFHQ/files_txt/ffhq512.txt
       io_backend:
         type: disk
    
@@ -59,11 +66,13 @@ data:
   val:
     type: folder 
     params:
-      dir_path: /mnt/lustre/zsyue/disk/IRDiff/Face/testing_data/syn_iclr_celeba512/lq
-      dir_path_gt: /mnt/lustre/zsyue/disk/IRDiff/Face/testing_data/syn_iclr_celeba512/hq
-      ext: png
-      need_gt_path: False
-      length: ~
-      mean: 0.0
-      std: 1.0
-
+      dir_path: /mnt/lustre/zsyue/projects/DifFace/Restoration/testdata/CelebA-Test/lq
+      dir_path_extra: /mnt/lustre/zsyue/projects/DifFace/Restoration/testdata/CelebA-Test/hq
+      transform_type: default
+      transform_kwargs:
+        mean: 0.0
+        std: 1.0
+      im_exts: png
+      length: 500
+      need_path: False
+      recursive: False

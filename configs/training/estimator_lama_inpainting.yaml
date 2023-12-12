@@ -1,0 +1,93 @@
+trainer:
+  target: trainer.TrainerInpainting
+
+model:
+  target: models.lama.ffc.FFCResNetGenerator
+  params:
+    input_nc: 4
+    output_nc: 3
+    ngf: 64
+    n_downsampling: 3
+    n_blocks: 18
+    add_out_act: sigmoid
+    init_conv_kwargs:
+      ratio_gin: 0
+      ratio_gout: 0
+      enable_lfu: false
+    downsample_conv_kwargs:
+      ratio_gin: ${model.params.init_conv_kwargs.ratio_gout}
+      ratio_gout: ${model.params.downsample_conv_kwargs.ratio_gin}
+      enable_lfu: False
+    resnet_conv_kwargs:
+      ratio_gin: 0.75
+      ratio_gout: ${model.params.resnet_conv_kwargs.ratio_gin}
+      enable_lfu: False
+
+data:
+  train:
+    type: inpainting 
+    params:
+      dir_path: /mnt/lustre/share/zsyue/data/FFHQ/images256x256
+      transform_type: default
+      transform_kwargs:
+        mean: [0.0, 0.0, 0.0]
+        std: [1.0, 1.0, 1.0]
+      need_path: False
+      im_exts: png
+      recursive: False
+      mask_kwargs:
+        irregular_proba: 1
+        irregular_kwargs:
+          max_angle: 4
+          max_len: 200
+          max_width: 100
+          max_times: 5
+          min_times: 1
+
+        box_proba: 1
+        box_kwargs:
+          margin: 10
+          bbox_min_size: 30
+          bbox_max_size: 150
+          max_times: 4
+          min_times: 1
+
+        outpainting_proba: 1
+        outpainting_kwargs:
+          min_padding_percent: 0.04
+          max_padding_percent: 0.30
+          left_padding_prob: 0.5
+          top_padding_prob: 0.5
+          right_padding_prob: 0.5
+          bottom_padding_prob: 0.5
+  val:
+    type: folder 
+    params:
+      dir_path: /mnt/lustre/zsyue/projects/DifFace/Inpainting/testdata/CelebA-Test/lq
+      dir_path_extra: /mnt/lustre/zsyue/projects/DifFace/Inpainting/testdata/CelebA-Test/hq
+      transform_type: default
+      transform_kwargs:
+        mean: 0.0
+        std: 1.0
+      im_exts: png
+      need_path: False
+      length: 100
+      recursive: False
+
+train:
+  lr: 1e-4
+  lr_min: 5e-6
+  batch: [64, 8]   # batchsize for training and validation
+  microbatch: 16
+  num_workers: 4
+  prefetch_factor: 2
+  iterations: 500000
+  weight_decay: 0
+  save_freq: 10000
+  val_freq: ${train.save_freq}
+  log_freq: [100, 200, 5]
+  ema_rate: 0.999
+  loss_type: L1
+  tf_logging: True
+  local_logging: True
+
