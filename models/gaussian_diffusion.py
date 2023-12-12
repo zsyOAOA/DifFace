@@ -239,7 +239,18 @@ class GaussianDiffusion:
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def p_mean_variance(
-        self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None
+        self,
+        model,
+        x,
+        t,
+        y0,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        gamma=0.,
+        num_update=1,
+        regularizer=None,
+        cond_kwargs=None,
     ):
         """
         Apply the model to get p(x_{t-1} | x_t), as well as a prediction of
@@ -249,12 +260,18 @@ class GaussianDiffusion:
                       as input.
         :param x: the [N x C x ...] tensor at time t.
         :param t: a 1-D Tensor of timesteps.
+        :param y0: low-quality image
         :param clip_denoised: if True, clip the denoised signal into [-1, 1].
         :param denoised_fn: if not None, a function which applies to the
             x_start prediction before it is used to sample. Applies before
             clip_denoised.
         :param model_kwargs: if not None, a dict of extra keyword arguments to
             pass to the model. This can be used for conditioning.
+        :param gamma: hyper-parameter to regularize the predicted x_start
+                    0.5 * || x - x_0 ||_2 + gamma * R(x_0, y_0)      (1)
+        :param num_update: number of update for x_start based on Eq. (1)
+        :param regularizer: the constraint for R in Eq. (1)
+        :param cond_kwargs: extra params for the regrlarizer
         :return: a dict with the following keys:
                  - 'mean': the model mean output.
                  - 'variance': the model variance output.
@@ -310,14 +327,35 @@ class GaussianDiffusion:
             pred_xstart = process_xstart(
                 self._predict_xstart_from_xprev(x_t=x, t=t, xprev=model_output)
             )
+            if gamma > 0:
+                pred_xstart = self._refine_xstart(
+                        pred_xstart,
+                        y0=y0,
+                        gamma=gamma,
+                        num_update=num_update,
+                        regularizer=regularizer,
+                        cond_kwargs=cond_kwargs,
+                        )
+                pred_xstart = process_xstart(pred_xstart)
             model_mean = model_output
         elif self.model_mean_type in [ModelMeanType.START_X, ModelMeanType.EPSILON]:
             if self.model_mean_type == ModelMeanType.START_X:      # predict x_0
                 pred_xstart = process_xstart(model_output)
             else:
+                pred_noise = model_output
                 pred_xstart = process_xstart(
                     self._predict_xstart_from_eps(x_t=x, t=t, eps=model_output)
                 )                                                  #  predict \eps
+            if gamma > 0:
+                pred_xstart = self._refine_xstart(
+                        pred_xstart,
+                        y0=y0,
+                        gamma=gamma,
+                        num_update=num_update,
+                        regularizer=regularizer,
+                        cond_kwargs=cond_kwargs,
+                        )
+                pred_xstart = process_xstart(pred_xstart)
             model_mean, _, _ = self.q_posterior_mean_variance(
                 x_start=pred_xstart, x_t=x, t=t
             )
@@ -332,7 +370,37 @@ class GaussianDiffusion:
             "variance": model_variance,
             "log_variance": model_log_variance,
             "pred_xstart": pred_xstart,
+            "pred_noise": pred_noise,
         }
+
+    def _refine_xstart(self, x_start, y0, gamma, num_update=1, regularizer=None, cond_kwargs=None):
+        """
+        :param x_start: predicted x_0 by the diffusion model
+        :param y0: low-quality image, [-1,1]
+        :param gamma: hyper-parameter to regularize the predicted x_start
+                    0.5 * || x - x_0 ||_2 + gamma * R(x_0, y_0)      (1)
+        :param num_update: number of update for x_start based on Eq. (1)
+        :param regularizer: the constraint for R in Eq. (1)
+        :param cond_kwargs: extra params for the regrlarizer
+        """
+        original_dtype = x_start.dtype
+        x0_current = th.empty_like(x_start, dtype=th.float32).copy_(x_start)
+        x0_current.requires_grad_(True)
+        for _ in range(num_update):
+            if cond_kwargs is None:
+                loss = regularizer(y0, x0_current)
+            else:
+                loss = regularizer(y0, x0_current, cond_kwargs)
+            grad = th.autograd.grad(
+                        outputs=loss,
+                        inputs=x0_current,
+                        grad_outputs=None,
+                                    )[0]
+            assert grad.shape == x0_current.shape
+            x0_update = x0_current.detach() - gamma * grad
+            x0_current.data = x0_update.data
+
+        return x0_update.type(original_dtype)
 
     def _predict_xstart_from_eps(self, x_t, t, eps):
         assert x_t.shape == eps.shape
@@ -363,7 +431,14 @@ class GaussianDiffusion:
         return t
 
     def p_sample(
-        self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None
+        self, model, x, t, y0,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        gamma=0.,
+        num_update=1,
+        regularizer=None,
+        cond_kwargs=None,
     ):
         """
         Sample x_{t-1} from the model at the given timestep.
@@ -371,11 +446,17 @@ class GaussianDiffusion:
         :param model: the model to sample from.
         :param x: the current tensor at x_{t-1}.
         :param t: the value of t, starting at 0 for the first diffusion step.
+        :param y0: low-quality image
         :param clip_denoised: if True, clip the x_start prediction to [-1, 1].
         :param denoised_fn: if not None, a function which applies to the
             x_start prediction before it is used to sample.
         :param model_kwargs: if not None, a dict of extra keyword arguments to
             pass to the model. This can be used for conditioning.
+        :param gamma: hyper-parameter to regularize the predicted x_start
+                    0.5 * || x - x_0 ||_2 + gamma * R(x_0, y_0)      (1)
+        :param num_update: number of update for x_start based on Eq. (1)
+        :param regularizer: the constraint for R in Eq. (1)
+        :param cond_kwargs: extra params for the regrlarizer
         :return: a dict containing the following keys:
                  - 'sample': a random sample from the model.
                  - 'pred_xstart': a prediction of x_0.
@@ -384,9 +465,14 @@ class GaussianDiffusion:
             model,
             x,
             t,
+            y0,
             clip_denoised=clip_denoised,
             denoised_fn=denoised_fn,
             model_kwargs=model_kwargs,
+            gamma=gamma,
+            num_update=num_update,
+            regularizer=regularizer,
+            cond_kwargs=cond_kwargs,
         )
         noise = th.randn_like(x)
         nonzero_mask = (
@@ -399,6 +485,7 @@ class GaussianDiffusion:
         self,
         model,
         shape,
+        y0=None,
         noise=None,
         start_timesteps=None,
         clip_denoised=True,
@@ -406,12 +493,17 @@ class GaussianDiffusion:
         model_kwargs=None,
         device=None,
         progress=False,
+        gamma=0.,
+        num_update=1,
+        regularizer=None,
+        cond_kwargs=None,
     ):
         """
         Generate samples from the model.
 
         :param model: the model module.
         :param shape: the shape of the samples, (N, C, H, W).
+        :param y0: low-quality image
         :param noise: if specified, the noise from the encoder to sample.
                       Should be of the same shape as `shape`.
         :param clip_denoised: if True, clip x_start predictions to [-1, 1].
@@ -422,12 +514,18 @@ class GaussianDiffusion:
         :param device: if specified, the device to create the samples on.
                        If not specified, use a model parameter's device.
         :param progress: if True, show a tqdm progress bar.
+        :param gamma: hyper-parameter to regularize the predicted x_start
+                    0.5 * || x - x_0 ||_2 + gamma * R(x_0, y_0)      (1)
+        :param num_update: number of update for x_start based on Eq. (1)
+        :param regularizer: the constraint for R in Eq. (1)
+        :param cond_kwargs: extra params for the regrlarizer
         :return: a non-differentiable batch of samples.
         """
         final = None
         for sample in self.p_sample_loop_progressive(
             model,
             shape,
+            y0=y0,
             noise=noise,
             start_timesteps=start_timesteps,
             clip_denoised=clip_denoised,
@@ -435,6 +533,10 @@ class GaussianDiffusion:
             model_kwargs=model_kwargs,
             device=device,
             progress=progress,
+            gamma=gamma,
+            num_update=num_update,
+            regularizer=regularizer,
+            cond_kwargs=cond_kwargs,
         ):
             final = sample
         return final["sample"]
@@ -443,6 +545,7 @@ class GaussianDiffusion:
         self,
         model,
         shape,
+        y0,
         noise=None,
         start_timesteps=None,
         clip_denoised=True,
@@ -450,6 +553,10 @@ class GaussianDiffusion:
         model_kwargs=None,
         device=None,
         progress=False,
+        gamma=0.,
+        num_update=1,
+        regularizer=None,
+        cond_kwargs=None,
     ):
         """
         Generate samples from the model and yield intermediate samples from
@@ -480,187 +587,21 @@ class GaussianDiffusion:
 
         for i in indices:
             t = th.tensor([i] * shape[0], device=device)
-            with th.no_grad():
-                out = self.p_sample(
-                    model,
-                    img,
-                    t,
-                    clip_denoised=clip_denoised,
-                    denoised_fn=denoised_fn,
-                    model_kwargs=model_kwargs,
-                )
-                yield out
-                img = out["sample"]
-
-    def ddim_sample(
-        self,
-        model,
-        x,
-        t,
-        clip_denoised=True,
-        denoised_fn=None,
-        model_kwargs=None,
-        eta=0.0,
-    ):
-        """
-        Sample x_{t-1} from the model using DDIM.
-
-        Same usage as p_sample().
-        """
-        out = self.p_mean_variance(
-            model,
-            x,
-            t,
-            clip_denoised=clip_denoised,
-            denoised_fn=denoised_fn,
-            model_kwargs=model_kwargs,
-        )
-        # Usually our model outputs epsilon, but we re-derive it
-        # in case we used x_start or x_prev prediction.
-        eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
-        alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
-        alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, t, x.shape)
-        sigma = (
-            eta
-            * th.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
-            * th.sqrt(1 - alpha_bar / alpha_bar_prev)
-        )
-        # Equation 12.
-        noise = th.randn_like(x)
-        mean_pred = (
-            out["pred_xstart"] * th.sqrt(alpha_bar_prev)
-            + th.sqrt(1 - alpha_bar_prev - sigma ** 2) * eps
-        )
-        nonzero_mask = (
-            (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
-        )  # no noise when t == 0
-        sample = mean_pred + nonzero_mask * sigma * noise
-        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
-
-    def ddim_reverse_sample(
-        self,
-        model,
-        x,
-        t,
-        clip_denoised=True,
-        denoised_fn=None,
-        model_kwargs=None,
-        eta=0.0,
-    ):
-        """
-        Sample x_{t+1} from the model using DDIM reverse ODE.
-        """
-        assert eta == 0.0, "Reverse ODE only for deterministic path"
-        out = self.p_mean_variance(
-            model,
-            x,
-            t,
-            clip_denoised=clip_denoised,
-            denoised_fn=denoised_fn,
-            model_kwargs=model_kwargs,
-        )
-        # Usually our model outputs epsilon, but we re-derive it
-        # in case we used x_start or x_prev prediction.
-        eps = (
-            _extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x.shape) * x
-            - out["pred_xstart"]
-        ) / _extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x.shape)
-        alpha_bar_next = _extract_into_tensor(self.alphas_cumprod_next, t, x.shape)
-
-        # Equation 12. reversed
-        mean_pred = (
-            out["pred_xstart"] * th.sqrt(alpha_bar_next)
-            + th.sqrt(1 - alpha_bar_next) * eps
-        )
-
-        return {"sample": mean_pred, "pred_xstart": out["pred_xstart"]}
-
-    def ddim_sample_loop(
-        self,
-        model,
-        shape,
-        noise=None,
-        start_timesteps=None,
-        clip_denoised=True,
-        denoised_fn=None,
-        model_kwargs=None,
-        device=None,
-        progress=False,
-        eta=0.0,
-    ):
-        """
-        Generate samples from the model using DDIM.
-
-        Same usage as p_sample_loop().
-        """
-        final = None
-        for sample in self.ddim_sample_loop_progressive(
-            model,
-            shape,
-            noise=noise,
-            start_timesteps=start_timesteps,
-            clip_denoised=clip_denoised,
-            denoised_fn=denoised_fn,
-            model_kwargs=model_kwargs,
-            device=device,
-            progress=progress,
-            eta=eta,
-        ):
-            final = sample
-        return final["sample"]
-
-    def ddim_sample_loop_progressive(
-        self,
-        model,
-        shape,
-        noise=None,
-        start_timesteps=None,
-        clip_denoised=True,
-        denoised_fn=None,
-        model_kwargs=None,
-        device=None,
-        progress=False,
-        eta=0.0,
-    ):
-        """
-        Use DDIM to sample from the model and yield intermediate samples from
-        each timestep of DDIM.
-
-        Same usage as p_sample_loop_progressive().
-        """
-        if device is None:
-            device = next(model.parameters()).device
-        assert isinstance(shape, (tuple, list))
-        if noise is not None:
-            img = noise
-        else:
-            img = th.randn(*shape, device=device)
-        if start_timesteps is None:
-            indices = list(range(self.num_timesteps))[::-1]
-        else:
-            assert noise is not None
-            indices = list(range(start_timesteps))[::-1]
-
-        if progress:
-            # Lazy import so that we don't depend on tqdm.
-            from tqdm.auto import tqdm
-
-            indices = tqdm(indices)
-
-        for i in indices:
-            t = th.tensor([i] * shape[0], device=device)
-            with th.no_grad():
-                out = self.ddim_sample(
-                    model,
-                    img,
-                    t,
-                    clip_denoised=clip_denoised,
-                    denoised_fn=denoised_fn,
-                    model_kwargs=model_kwargs,
-                    eta=eta,
-                )
-                yield out
-                img = out["sample"]
+            out = self.p_sample(
+                model,
+                img,
+                t,
+                y0=y0,
+                clip_denoised=clip_denoised,
+                denoised_fn=denoised_fn,
+                model_kwargs=model_kwargs,
+                gamma=gamma,
+                num_update=num_update,
+                regularizer=regularizer,
+                cond_kwargs=cond_kwargs,
+            )
+            yield out
+            img = out["sample"]
 
     def _vb_terms_bpd(
         self, model, x_start, x_t, t, clip_denoised=True, model_kwargs=None
@@ -843,4 +784,168 @@ class GaussianDiffusion:
             "xstart_mse": xstart_mse,
             "mse": mse,
         }
+
+    def ddim_sample(
+        self,
+        model,
+        x,
+        t,
+        y0=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        eta=0.0,
+        gamma=0.0,
+        num_update=1,
+        regularizer=None,
+        cond_kwargs=None,
+    ):
+        """
+        Sample x_{t-1} from the model using DDIM.
+
+        Same usage as p_sample().
+        """
+        out = self.p_mean_variance(
+            model,
+            x,
+            t,
+            y0,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+            gamma=gamma,
+            num_update=num_update,
+            regularizer=regularizer,
+            cond_kwargs=cond_kwargs,
+        )
+        # Usually our model outputs epsilon, but we re-derive it
+        # in case we used x_start or x_prev prediction.
+        if "pred_noise" in out:
+            eps = out["pred_noise"]
+        else:
+            eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
+        alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
+        alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, t, x.shape)
+        sigma = (
+            eta
+            * th.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
+            * th.sqrt(1 - alpha_bar / alpha_bar_prev)
+        )
+        # Equation 12.
+        noise = th.randn_like(x)
+        mean_pred = (
+            out["pred_xstart"] * th.sqrt(alpha_bar_prev)
+            + th.sqrt(1 - alpha_bar_prev - sigma ** 2) * eps
+        )
+        nonzero_mask = (
+            (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+        )  # no noise when t == 0
+        sample = mean_pred + nonzero_mask * sigma * noise
+        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+
+    def ddim_sample_loop(
+        self,
+        model,
+        shape,
+        y0=None,
+        noise=None,
+        start_timesteps=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+        eta=0.0,
+        gamma=0.0,
+        num_update=1,
+        regularizer=None,
+        cond_kwargs=None,
+    ):
+        """
+        Generate samples from the model using DDIM.
+
+        Same usage as p_sample_loop().
+        """
+        final = None
+        for sample in self.ddim_sample_loop_progressive(
+            model,
+            shape,
+            y0=y0,
+            noise=noise,
+            start_timesteps=start_timesteps,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+            device=device,
+            progress=progress,
+            eta=eta,
+            gamma=gamma,
+            num_update=num_update,
+            regularizer=regularizer,
+            cond_kwargs=cond_kwargs,
+        ):
+            final = sample
+        return final["sample"]
+
+    def ddim_sample_loop_progressive(
+        self,
+        model,
+        shape,
+        y0=None,
+        noise=None,
+        start_timesteps=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+        eta=0.0,
+        gamma=0.0,
+        num_update=1,
+        regularizer=None,
+        cond_kwargs=None,
+    ):
+        """
+        Use DDIM to sample from the model and yield intermediate samples from
+        each timestep of DDIM.
+
+        Same usage as p_sample_loop_progressive().
+        """
+        if device is None:
+            device = next(model.parameters()).device
+        assert isinstance(shape, (tuple, list))
+        if noise is not None:
+            img = noise
+        else:
+            img = th.randn(*shape, device=device)
+        if start_timesteps is None:
+            indices = list(range(self.num_timesteps))[::-1]
+        else:
+            assert noise is not None
+            indices = list(range(start_timesteps))[::-1]
+
+        if progress:
+            # Lazy import so that we don't depend on tqdm.
+            from tqdm.auto import tqdm
+
+            indices = tqdm(indices)
+
+        for i in indices:
+            t = th.tensor([i] * shape[0], device=device)
+            out = self.ddim_sample(
+                model,
+                img,
+                t,
+                y0=y0,
+                clip_denoised=clip_denoised,
+                denoised_fn=denoised_fn,
+                model_kwargs=model_kwargs,
+                eta=eta,
+                gamma=gamma,
+                num_update=num_update,
+                regularizer=regularizer,
+                cond_kwargs=cond_kwargs,
+            )
+            yield out
+            img = out["sample"]
 

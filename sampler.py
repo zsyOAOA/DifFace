@@ -3,39 +3,41 @@
 # Power by Zongsheng Yue 2022-07-13 16:59:27
 
 
-import os
-import random
+import os, math, random
+import cv2
 import numpy as np
-from math import ceil
+from tqdm import tqdm
 from pathlib import Path
 from einops import rearrange
-from omegaconf import OmegaConf
-from skimage import img_as_ubyte
-from ResizeRight.resize_right import resize
+from collections import OrderedDict
 
 from utils import util_net
 from utils import util_image
 from utils import util_common
 
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
 
-from basicsr.utils import img2tensor
+from datapipe.datasets import BaseDataFolder
+
 from basicsr.archs.rrdbnet_arch import RRDBNet
 from basicsr.utils.realesrgan_utils import RealESRGANer
 from facelib.utils.face_restoration_helper import FaceRestoreHelper
 
 class BaseSampler:
-    def __init__(self, configs):
+    def __init__(self, configs, im_size=512, use_fp16=False):
         '''
         Input:
             configs: config, see the yaml file in folder ./configs/sample/
         '''
         self.configs = configs
-        self.display = configs.display
-        self.diffusion_cfg = configs.diffusion
+        self.configs.im_size = im_size
+        self.configs.use_fp16 = use_fp16
+        self.dtype = torch.float16 if use_fp16 else torch.float32
+        if hasattr(self.configs.model.params, 'use_fp16'):
+            self.configs.model.params.use_fp16 = use_fp16
 
         self.setup_dist()  # setup distributed training: self.num_gpus, self.rank
 
@@ -45,23 +47,16 @@ class BaseSampler:
 
     def setup_seed(self, seed=None):
         seed = self.configs.seed if seed is None else seed
-        seed += (self.rank+1) * 10000
-        if self.rank == 0 and self.display:
-            print(f'Setting random seed {seed}')
+        seed += (self.rank) * 10000
+        if self.rank == 0:
+            print(f'Setting random seed {seed}', flush=True)
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-    def setup_dist(self, gpu_id=None):
-        gpu_id = self.configs.gpu_id if gpu_id is None else gpu_id
-        if gpu_id:
-            gpu_id = gpu_id
-            num_gpus = len(gpu_id)
-            os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-            os.environ['CUDA_VISIBLE_DEVICES'] = ','.join([gpu_id[ii] for ii in range(num_gpus)])
-        else:
-            num_gpus = torch.cuda.device_count()
+    def setup_dist(self):
+        num_gpus = torch.cuda.device_count()
 
         if num_gpus > 1:
             if mp.get_start_method(allow_none=True) is None:
@@ -74,110 +69,59 @@ class BaseSampler:
         self.rank = int(os.environ['LOCAL_RANK']) if num_gpus > 1 else 0
 
     def build_model(self):
-        obj = util_common.get_obj_from_str(self.configs.diffusion.target)
-        self.diffusion = obj(**self.configs.diffusion.params)
-
         obj = util_common.get_obj_from_str(self.configs.model.target)
         model = obj(**self.configs.model.params).cuda()
         if not self.configs.model.ckpt_path is None:
             self.load_model(model, self.configs.model.ckpt_path)
-        self.model = DDP(model, device_ids=[self.rank,]) if self.num_gpus > 1 else model
+        if self.configs.use_fp16:
+            model.convert_to_fp16()
+        self.model = model
+        self.freeze_model(self.model)
         self.model.eval()
 
     def load_model(self, model, ckpt_path=None):
-        if not ckpt_path is None:
-            if self.rank == 0 and self.display:
-                print(f'Loading from {ckpt_path}...')
-            ckpt = torch.load(ckpt_path, map_location=f"cuda:{self.rank}")
-            util_net.reload_model(model, ckpt)
-            if self.rank == 0 and self.display:
-                print('Loaded Done')
-
-    def reset_diffusion(self, diffusion_cfg):
-        self.diffusion = create_gaussian_diffusion(**diffusion_cfg)
-
-class DiffusionSampler(BaseSampler):
-    def sample_func(self, start_timesteps=None, bs=4, num_images=1000, save_dir=None):
-        if self.rank == 0 and self.display:
-            print('Begining sampling:')
-            save_dir = f'./sample_results' if save_dir is None else save_dir
-            util_common.mkdir(save_dir, delete=True)
-        if self.num_gpus > 1:
-            dist.barrier()
-
-        h = w = self.configs.im_size
-        total_iters = ceil(num_images / (bs * self.num_gpus))
-        for ii in range(total_iters):
-            if self.rank == 0 and self.display:
-                print(f'Processing: {ii+1}/{total_iters}')
-            noise = torch.randn((bs, 3, h, w), dtype=torch.float32).cuda()
-            if 'ddim' in self.configs.diffusion.params.timestep_respacing:
-                sample = self.diffusion.ddim_sample_loop(
-                        self.model,
-                        shape=(bs, 3, h, w),
-                        noise=noise,
-                        start_timesteps=start_timesteps,
-                        clip_denoised=True,
-                        denoised_fn=None,
-                        model_kwargs=None,
-                        device=None,
-                        progress=False,
-                        eta=0.0,
-                        )
-            else:
-                sample = self.diffusion.p_sample_loop(
-                        self.model,
-                        shape=(bs, 3, h, w),
-                        noise=noise,
-                        start_timesteps=start_timesteps,
-                        clip_denoised=True,
-                        denoised_fn=None,
-                        model_kwargs=None,
-                        device=None,
-                        progress=False,
-                        )
-            sample = util_image.normalize_th(sample, reverse=True).clamp(0.0, 1.0)
-            if save_dir is not None:
-                self.imwrite_batch(sample, save_dir, ii+1)
-
-        if self.num_gpus > 1:
-            dist.barrier()
         if self.rank == 0:
-            self.tidy_save(save_dir, num_images)
+            print(f'Loading from {ckpt_path}...', flush=True)
+        ckpt = torch.load(ckpt_path, map_location=f"cuda:{self.rank}")
+        if 'state_dict' in ckpt:
+            ckpt = ckpt['state_dict']
+        util_net.reload_model(model, ckpt)
+        if self.rank == 0:
+            print('Loaded Done', flush=True)
 
-        return sample
+    def freeze_model(self, net):
+        for params in net.parameters():
+            params.requires_grad = False
 
-    def tidy_save(self, save_dir, num_images):
-        files_path = [x for x in Path(save_dir).glob('*.png')]
-        if len(files_path) > num_images:
-            for path in files_path[num_images:]:
-                path.unlink()
-        for ii, path in enumerate(files_path[:num_images]):
-            new_path = str(path.parent / f'{ii+1}.png')
-            os.system(f'mv {path} {new_path}')
+class DifFaceSampler(BaseSampler):
+    def restore_func(self, y0, model_kwargs_ir):
+        if model_kwargs_ir is None:
+            inputs = y0
+        elif 'mask' in model_kwargs_ir:
+            inputs = torch.cat([y0, model_kwargs_ir['mask']], dim=1)
+        else:
+            raise ValueError("Not compativle type for model_kwargs!")
 
-    def imwrite_batch(self, sample, fake_dir, bs_ind):
-        if not isinstance(fake_dir, Path):
-            fake_dir = Path(fake_dir)
-        for jj in range(sample.shape[0]):
-            im = rearrange(sample[jj,].cpu().numpy(), 'c h w -> h w c') # [0, 1], RGB
-            im_path = fake_dir / f'rank{self.rank}_bs{bs_ind}_{jj+1}.png'
-            util_image.imwrite(im, im_path, chn='rgb', dtype_in='float32')
+        original_dtype = y0.dtype
+        with torch.no_grad():
+            out = self.model_ir(inputs.type(self.dtype)).type(original_dtype)
 
-class DifIRSampler(BaseSampler):
+        return out
+
     def build_model(self):
         super().build_model()
 
-        if not self.configs.model_ir is None:
-            obj = util_common.get_obj_from_str(self.configs.model_ir.target)
-            model_ir = obj(**self.configs.model_ir.params).cuda()
-            if not self.configs.model_ir.ckpt_path is None:
-                self.load_model(model_ir, self.configs.model_ir.ckpt_path)
-            if self.num_gpus > 1 and len(list(model_ir.parameters(0))) > 0:
-                self.model_ir = DDP(model_ir, device_ids=[self.rank,])
-            else:
-                self.model_ir = model_ir
-            self.model_ir.eval()
+        obj = util_common.get_obj_from_str(self.configs.diffusion.target)
+        self.diffusion = obj(**self.configs.diffusion.params)
+
+        # diffused estimator, restoration model
+        obj = util_common.get_obj_from_str(self.configs.model_ir.target)
+        model_ir = obj(**self.configs.model_ir.params).cuda()
+        self.load_model(model_ir, self.configs.model_ir.ckpt_path)
+        if self.configs.use_fp16:
+            model_ir = model_ir.half()
+        self.model_ir = model_ir
+        self.model_ir.eval()
 
         if not self.configs.aligned:
             assert self.num_gpus == 1, 'Only support one gpu for unalinged model'
@@ -189,6 +133,7 @@ class DifIRSampler(BaseSampler):
                     det_model = self.configs.detection.det_model,
                     save_ext='png',
                     use_parse=True,
+                    use_fp16=True,
                     device=torch.device(f'cuda:{self.rank}'),
                     )
 
@@ -205,136 +150,134 @@ class DifIRSampler(BaseSampler):
                 device=torch.device(f'cuda:{self.rank}'),
                 )  # need to set False in CPU mode
 
+        # for restoration
+        if 'net_hq' in self.configs:
+            ckpt_path = self.configs.net_hq.ckpt_path
+            params = self.configs.net_hq.get('params', dict)
+            net_hq = util_common.get_obj_from_str(self.configs.net_hq.target)(**params)
+            self.net_hq = net_hq.cuda()
+            self.load_model(self.net_hq, ckpt_path)
+            self.net_hq.eval()
+        if 'net_lq' in self.configs:
+            ckpt_path = self.configs.net_lq.ckpt_path
+            params = self.configs.net_lq.get('params', dict)
+            net_lq = util_common.get_obj_from_str(self.configs.net_lq.target)(**params)
+            self.net_lq = net_lq.cuda()
+            self.load_model(self.net_lq, ckpt_path)
+            self.net_lq.eval()
+            self.freeze_model(self.net_lq)
+
     def sample_func_ir_aligned(
             self,
             y0,
             start_timesteps=None,
-            post_fun=None,
-            model_kwargs_ir=None,
             need_restoration=True,
+            model_kwargs_ir=None,
+            gamma=0.,
+            eta=0.,
+            num_update=1,
+            regularizer=None,
+            cond_kwargs=None,
             ):
         '''
         Input:
-            y0: n x c x h x w torch tensor, low-quality image, [0, 1], RGB
-                or, h x w x c, numpy array, [0, 255], uint8, BGR
+            y0: b x c x h x w torch tensor, low-quality image, [0, 1], RGB, float32
             start_timesteps: integer, range [0, num_timesteps-1],
                 for accelerated sampling (e.g., 'ddim250'), range [0, 249]
-            post_fun: post-processing for the enhanced image
             model_kwargs_ir: additional parameters for restoration model
+            gamma: hyper-parameter to regularize the predicted x_start
+                    0.5 * || x - x_0 ||_2 + gamma * R(x_0, y_0)      (1)
+            num_update: number of update for x_start based on Eq. (1)
+            regularizer: the constraint for R in Eq. (1)
+            cond_kwargs: extra params for the regrlarizer
+            eta: hyper-parameter eta for ddim
         Output:
             sample: n x c x h x w, torch tensor, [0,1], RGB
         '''
-        if not isinstance(y0, torch.Tensor):
-            y0 = img2tensor(y0, bgr2rgb=True, float32=True).unsqueeze(0) / 255.  # 1 x c x h x w, [0,1]
-
         if start_timesteps is None:
             start_timesteps = self.diffusion.num_timesteps
 
-        if post_fun is None:
-            post_fun = lambda x: util_image.normalize_th(
-                    im=x,
-                    mean=0.5,
-                    std=0.5,
-                    reverse=False,
-                    )
-
         # basical image restoration
         device = next(self.model.parameters()).device
-        y0 = y0.to(device=device, dtype=torch.float32)
+        y0 = y0.to(device=device)
+
+        h_old, w_old = y0.shape[2:4]
+        if not (h_old == self.configs.im_size and w_old == self.configs.im_size):
+            y0 = F.interpolate(y0, size=(self.configs.im_size,)*2, mode='bicubic', antialias=True)
+            if 'mask' in cond_kwargs:
+                cond_kwargs['mask'] = detect_mask(y0, thres=0)
+
         if need_restoration:
-            with torch.no_grad():
-                if model_kwargs_ir is None:
-                    im_hq = self.model_ir(y0)
-                else:
-                    im_hq = self.model_ir(y0, **model_kwargs_ir)
+            im_hq = self.restore_func(y0, model_kwargs_ir)
         else:
             im_hq = y0
         im_hq.clamp_(0.0, 1.0)
 
-        h_old, w_old = im_hq.shape[2:4]
-        if not (h_old == self.configs.im_size and w_old == self.configs.im_size):
-            im_hq = resize(im_hq, out_shape=(self.configs.im_size,) * 2).to(torch.float32)
-
         # diffuse for im_hq
         yt = self.diffusion.q_sample(
-                x_start=post_fun(im_hq),
+                x_start=util_image.normalize_th(im_hq, mean=0.5, std=0.5, reverse=False),
                 t=torch.tensor([start_timesteps,]*im_hq.shape[0], device=device),
                 )
 
         assert yt.shape[-1] == self.configs.im_size and yt.shape[-2] == self.configs.im_size
-        if 'ddim' in self.configs.diffusion.params.timestep_respacing:
-            sample = self.diffusion.ddim_sample_loop(
-                    self.model,
-                    shape=yt.shape,
-                    noise=yt,
-                    start_timesteps=start_timesteps,
-                    clip_denoised=True,
-                    denoised_fn=None,
-                    model_kwargs=None,
-                    device=None,
-                    progress=False,
-                    eta=0.0,
-                    )
-        else:
-            sample = self.diffusion.p_sample_loop(
-                    self.model,
-                    shape=yt.shape,
-                    noise=yt,
-                    start_timesteps=start_timesteps,
-                    clip_denoised=True,
-                    denoised_fn=None,
-                    model_kwargs=None,
-                    device=None,
-                    progress=False,
-                    )
-
+        sample = self.diffusion.ddim_sample_loop(
+                self.model,
+                y0=util_image.normalize_th(y0, mean=0.5, std=0.5, reverse=False),
+                shape=yt.shape,
+                noise=yt,
+                start_timesteps=start_timesteps,
+                clip_denoised=True,
+                denoised_fn=None,
+                model_kwargs=None,
+                device=None,
+                progress=False,
+                eta=eta,
+                gamma=gamma,
+                num_update=num_update,
+                regularizer=regularizer,
+                cond_kwargs=cond_kwargs,
+                )
         sample = util_image.normalize_th(sample, reverse=True).clamp(0.0, 1.0)
 
         if not (h_old == self.configs.im_size and w_old == self.configs.im_size):
-            sample = resize(sample, out_shape=(h_old, w_old)).clamp(0.0, 1.0)
+            sample = F.interpolate(sample, size=(h_old, w_old), mode='bicubic', antialias=True).clamp(0.0, 1.0)
 
         return sample, im_hq
 
-    def sample_func_bfr_unaligned(
+    def sample_func_ir_unaligned(
             self,
             y0,
-            bs=16,
+            micro_bs=16,
             start_timesteps=None,
-            post_fun=None,
-            model_kwargs_ir=None,
             need_restoration=True,
-            only_center_face=False,
+            eta=0.0,
             draw_box=False,
             ):
         '''
         Input:
-            y0: h x w x c numpy array, uint8, BGR
-            bs: batch size for face restoration
+            y0: h x w x c numpy array, uint8, BGR, or image path
+            micro_bs: batch size for face restoration
             upscale: upsampling factor for the restorated image
             start_timesteps: integer, range [0, num_timesteps-1],
                 for accelerated sampling (e.g., 'ddim250'), range [0, 249]
-            post_fun: post-processing for the enhanced image
-            model_kwargs_ir: additional parameters for restoration model
-            only_center_face:
             draw_box: draw a box for each face
+            eta: hyper-parameter eat for ddim
         Output:
             restored_img: h x w x c, numpy array, uint8, BGR
             restored_faces: list, h x w x c, numpy array, uint8, BGR
-            cropped_faces: list, h x w x c, numpy array, uint8, BGR
         '''
-
-        def  _process_batch(cropped_faces_list):
+        def _process_batch(cropped_faces_list):
             length = len(cropped_faces_list)
-            cropped_face_t = np.stack(
-                    img2tensor(cropped_faces_list, bgr2rgb=True, float32=True),
-                    axis=0) / 255.
-            cropped_face_t = torch.from_numpy(cropped_face_t).to(torch.device(f"cuda:{self.rank}"))
+            cropped_face_t = torch.cat(
+                    util_image.img2tensor(cropped_faces_list, bgr2rgb=True, out_type=self.dtype),
+                    axis=0).cuda() / 255.
             restored_faces = self.sample_func_ir_aligned(
                     cropped_face_t,
                     start_timesteps=start_timesteps,
-                    post_fun=post_fun,
-                    model_kwargs_ir=model_kwargs_ir,
                     need_restoration=need_restoration,
+                    gamma=0,
+                    eta=eta,
+                    model_kwargs_ir=None,
                     )[0]      # [0, 1], b x c x h x w
             return restored_faces
 
@@ -343,18 +286,20 @@ class DifIRSampler(BaseSampler):
         self.face_helper.clean_all()
         self.face_helper.read_image(y0)
         num_det_faces = self.face_helper.get_face_landmarks_5(
-                only_center_face=only_center_face,
+                only_center_face=False,
                 resize=640,
                 eye_dist_threshold=5,
                 )
+        if self.rank == 0:
+            print(f'\tdetect {num_det_faces} faces', flush=True)
         # align and warp each face
         self.face_helper.align_warp_face()
 
         num_cropped_face = len(self.face_helper.cropped_faces)
-        if num_cropped_face > bs:
+        if num_cropped_face > micro_bs:
             restored_faces = []
-            for idx_start in range(0, num_cropped_face, bs):
-                idx_end = idx_start + bs if idx_start + bs < num_cropped_face else num_cropped_face
+            for idx_start in range(0, num_cropped_face, micro_bs):
+                idx_end = idx_start + micro_bs if idx_start + micro_bs < num_cropped_face else num_cropped_face
                 current_cropped_faces = self.face_helper.cropped_faces[idx_start:idx_end]
                 current_restored_faces = _process_batch(current_cropped_faces)
                 current_restored_faces = util_image.tensor2img(
@@ -376,7 +321,10 @@ class DifIRSampler(BaseSampler):
             self.face_helper.add_restored_face(xx)
 
         # paste_back
-        bg_img = self.bg_model.enhance(y0, outscale=self.configs.detection.upscale)[0]
+        bg_img = self.bg_model.enhance(
+                self.face_helper.input_img,
+                outscale=self.configs.detection.upscale,
+                )[0]
         self.face_helper.get_inverse_affine(None)
         # paste each restored face to the input image
         restored_img = self.face_helper.paste_faces_to_input_image(
@@ -384,12 +332,216 @@ class DifIRSampler(BaseSampler):
                 draw_box=draw_box,
                 )
 
-        cropped_faces = self.face_helper.cropped_faces
+        return restored_img, restored_faces
 
-        return restored_img, restored_faces, cropped_faces
+    def inference(
+            self,
+            in_path,
+            out_path,
+            bs=1,
+            start_timesteps=None,
+            need_restoration=True,
+            gamma=0.,
+            num_update=1,
+            task='restoration',
+            draw_box=False,
+            suffix=None,
+            eta=0.0,
+            mask_back=False,
+            ):
+        '''
+        Input:
+            in_path: testing image path or folder
+            out_path: folder to save the retorated results
+            bs: batch size, totally on all the GPUs
+            start_timesteps: integer, range [0, num_timesteps-1],
+                for accelerated sampling (e.g., 250), range [0, 249]
+            need_restoration: degradation removal with diffused estimator
+            gamma: hyper-parameter to regularize the predicted x_start
+                    0.5 * || x - x_0 ||_2 + gamma * R(x_0, y_0)      (1)
+            num_update: number of update for x_start based on Eq. (1)
+            task: 'restoration' or 'inpainting'
+                  For inpainting, we assumed that the masked area is initially filled with 0.
+            cond_kwargs: extra params for the regrlarizer
+            draw_box: draw a box for each face
+            eta: eta for ddim
+            mask_back: only for inparinting, lq * (1-mask) + res * mask
+        '''
+        def _process_batch_aligned(y0, cond_kwargs, model_kwargs_ir):
+            '''
+            y0: b x c x h x w, [0,1]
+            '''
+            sample, _ = self.sample_func_ir_aligned(
+                    y0,
+                    start_timesteps,
+                    need_restoration=need_restoration,
+                    gamma=gamma,
+                    num_update=num_update,
+                    regularizer= masking_regularizer if task=='inpainting' else None,
+                    cond_kwargs=cond_kwargs,
+                    eta=eta,
+                    model_kwargs_ir=model_kwargs_ir,
+                    )
+            return sample
+
+        def _process_batch_unaligned(y0):
+            '''
+            y0: image path or h x w x c numpy array, uint8, BGR
+            '''
+            restored_img, restored_faces = self.sample_func_ir_unaligned(
+                    y0,
+                    micro_bs=16,
+                    start_timesteps=start_timesteps,
+                    need_restoration=need_restoration,
+                    draw_box=draw_box,
+                    eta=eta,
+                    )  # h x w x c, uint8, BGR
+            return restored_img, restored_faces
+
+        assert task in ['restoration', 'inpainting']
+        if not self.configs.aligned:
+            assert task == 'restoration', "Only support image restoration for unalinged image!"
+
+        # prepare result path
+        in_path = in_path if isinstance(in_path, Path) else Path(in_path)
+        out_path = out_path if isinstance(out_path, Path) else Path(out_path)
+        restored_face_dir = out_path / 'restored_faces'
+        if self.rank == 0:
+            util_common.mkdir(out_path, parents=True)
+            util_common.mkdir(restored_face_dir, parents=True)
+        if not self.configs.aligned:
+            restored_image_dir = out_path / 'restored_image'
+            if self.rank == 0:
+                util_common.mkdir(restored_image_dir, parents=True)
+
+        if in_path.is_dir():
+            if self.configs.aligned:
+                dataset = BaseDataFolder(
+                        dir_path=in_path,
+                        transform_type='default',
+                        transform_kwargs={'mean':0, 'std':1.0},
+                        need_path=True,
+                        im_exts=['png', 'jpg', 'jpeg', 'JPEG', 'bmp'],
+                        )
+                dataloader = torch.utils.data.DataLoader(
+                        dataset,
+                        batch_size=bs,
+                        shuffle=False,
+                        )
+                if self.rank == 0:
+                    print(f'Number of testing images: {len(dataset)}', flush=True)
+                for data in tqdm(dataloader):
+                    micro_batchsize = math.ceil(bs / self.num_gpus)
+                    ind_start = self.rank * micro_batchsize
+                    ind_end = ind_start + micro_batchsize
+                    if ind_start < data['image'].shape[0]:
+                        current_y0 = data['image'][ind_start:ind_end]
+                        current_path = data['path'][ind_start:ind_end]
+
+                        if task == 'inpainting':
+                            mask = detect_mask(current_y0, thres=0)
+                            cond_kwargs = model_kwargs_ir = {'mask': mask.cuda()}
+                        else:
+                            cond_kwargs = model_kwargs_ir = None
+                        sample = _process_batch_aligned(current_y0, cond_kwargs, model_kwargs_ir)
+                        if (not cond_kwargs is None) and 'mask' in cond_kwargs and mask_back:
+                            sample = sample * cond_kwargs['mask'] + current_y0.cuda() * (1-cond_kwargs['mask'])
+
+                        for jj in range(sample.shape[0]):
+                            restored_face = sample[jj,].squeeze(0).permute(1,2,0).cpu().numpy()  # h x w x c, [0,1], RGB
+                            if suffix == 'gamma':
+                                save_path = restored_face_dir / f'{Path(current_path[jj]).stem}_g{gamma:.2f}.png'
+                            else:
+                                save_path = restored_face_dir / f'{Path(current_path[jj]).stem}.png'
+                            util_image.imwrite(restored_face, save_path, chn='rgb', dtype_in='float32')
+            else:
+                assert self.num_gpus == 1
+                im_path_list = [x for x in in_path.glob('*.[jJpP][pPnN]*[gG]')]
+                print(f'Number of testing images: {len(im_path_list)}', flush=True)
+
+                for im_path_current in im_path_list:
+                    restored_img, restored_faces = _process_batch_unaligned(str(im_path_current))  # h x w x c, uint8, BGR
+
+                    if suffix == 'gamma':
+                        save_path = restored_image_dir / f'{im_path_current.stem}_g{gamma:.2f}_s{start_timesteps}.png'
+                    else:
+                        save_path = restored_image_dir / f'{im_path_current.stem}.png'
+                    util_image.imwrite(restored_img, save_path, chn='bgr', dtype_in='uint8')
+
+                    assert isinstance(restored_faces, list)
+                    for ii, restored_face in enumerate(restored_faces):
+                        save_path = restored_face_dir / f'{im_path_current.stem}_{ii:03d}.png'
+                        util_image.imwrite(restored_face, save_path, chn='bgr', dtype_in='uint8')
+        else:
+            y0 = util_image.imread(in_path, chn='rgb', dtype='float32')
+            y0 = util_image.img2tensor(y0, bgr2rgb=False, out_type=torch.float32) # 1 x c x h x w, [0,1]
+            if task == 'inpainting':
+                mask = detect_mask(y0, thres=0)
+                cond_kwargs = model_kwargs_ir = {'mask': mask.cuda()}
+            else:
+                cond_kwargs = model_kwargs_ir = None
+
+            if self.configs.aligned:
+                sample = _process_batch_aligned(y0, cond_kwargs, model_kwargs_ir)
+                if (not cond_kwargs is None) and 'mask' in cond_kwargs and mask_back:
+                    sample = sample * cond_kwargs['mask'] + y0.cuda() * (1-cond_kwargs['mask'])
+                restored_face = sample.squeeze(0).permute(1,2,0).cpu().numpy()  # h x w x c, [0,1], RGB
+                if suffix == 'gamma':
+                    if 'ddim' in self.configs.diffusion.params.timestep_respacing:
+                        save_path = restored_face_dir / f'{in_path.stem}_g{gamma:.2f}_ddim{start_timesteps}_e{eta:.1f}_n{num_update}.png'
+                    else:
+                        save_path = restored_face_dir / f'{in_path.stem}_g{gamma:.2f}_ddpm{start_timesteps}_n{num_update}.png'
+                else:
+                    save_path = restored_face_dir / f'{in_path.stem}.png'
+                util_image.imwrite(restored_face, save_path, chn='rgb', dtype_in='float32')
+            else:
+                restored_img, restored_faces = _process_batch_unaligned(str(in_path))  # h x w x c, uint8, BGR
+                if suffix == 'gamma':
+                    save_path = restored_image_dir / f'{in_path.stem}_g{gamma:.2f}.png'
+                else:
+                    save_path = restored_face_dir / f'{in_path.stem}.png'
+                util_image.imwrite(restored_img, save_path, chn='bgr', dtype_in='uint8')
+
+                assert isinstance(restored_faces, list)
+                for ii, restored_face in enumerate(restored_faces):
+                    save_path = restored_face_dir / f'{in_path.stem}_{ii:03d}.png'
+                    util_image.imwrite(restored_face, save_path, chn='bgr', dtype_in='uint8')
+
+        if self.num_gpus > 1:
+            dist.barrier()
+
+        if self.rank == 0:
+            print(f'Please enjoy the results in {str(out_path)}...', flush=True)
+
+def masking_regularizer(y0, x0, cond_kwargs):
+    '''
+    Input:
+        y0: low-quality image, b x c x h x w, [-1, 1]
+        x0: predicted high-quality image, b x c x h x w, [-1, 1]
+        cond_kwargs: additional network parameters.
+    '''
+    mask = cond_kwargs['mask']
+    if 'vqgan' in cond_kwargs:
+        pred = cond_kwargs['vqgan'].decode(x0)
+    else:
+        pred = x0
+
+    loss = (F.mse_loss(pred, y0, reduction='none') * (1 - mask)).sum()
+
+    return loss
+
+def detect_mask(y0, thres):
+    '''
+    Input:
+        y0: low-quality image, b x c x h x w , [0, 1]
+    '''
+    ysum = torch.sum(y0, dim=1, keepdim=True)
+    mask = torch.where(ysum==thres, torch.ones_like(ysum), torch.zeros_like(ysum))
+    return mask
 
 if __name__ == '__main__':
     import argparse
+    from omegaconf import OmegaConf
     parser = argparse.ArgumentParser()
     parser.add_argument(
             "--save_dir",
@@ -400,7 +552,7 @@ if __name__ == '__main__':
     parser.add_argument(
             "--gpu_id",
             type=str,
-            default='',
+            default='0',
             help="GPU Index, e.g., 025",
             )
     parser.add_argument(
@@ -421,19 +573,14 @@ if __name__ == '__main__':
             default=3000,
             help="Number of sampled images",
             )
-    parser.add_argument(
-            "--timestep_respacing",
-            type=str,
-            default='1000',
-            help="Sampling steps for accelerate",
-            )
     args = parser.parse_args()
 
     configs = OmegaConf.load(args.cfg_path)
     configs.gpu_id = args.gpu_id
-    configs.diffusion.params.timestep_respacing = args.timestep_respacing
+    # configs.diffusion.params.timestep_respacing = args.timestep_respacing
 
-    sampler_dist = DiffusionSampler(configs)
+    # sampler_dist = DiffusionSampler(configs)
+    sampler_dist = LDMSampler(configs)
 
     sampler_dist.sample_func(
             bs=args.bs,

@@ -1,7 +1,6 @@
 import random
 import numpy as np
 from pathlib import Path
-from ResizeRight.resize_right import resize
 from einops import rearrange
 
 import torch
@@ -14,24 +13,52 @@ from utils import util_common
 
 from basicsr.data.realesrgan_dataset import RealESRGANDataset
 from .ffhq_degradation_dataset import FFHQDegradationDataset
+from .masks import MixedMaskGenerator
 
-def get_transforms(transform_type, out_size, sf):
+def get_transforms(transform_type, kwargs):
+    '''
+    Accepted optins in kwargs.
+        mean: scaler or sequence, for nornmalization
+        std: scaler or sequence, for nornmalization
+        crop_size: int or sequence, random or center cropping
+        scale, out_shape: for Bicubic
+        min_max: tuple or list with length 2, for cliping
+    '''
     if transform_type == 'default':
         transform = thv.transforms.Compose([
-            util_image.SpatialAug(),
             thv.transforms.ToTensor(),
-            thv.transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+            thv.transforms.Normalize(mean=kwargs.get('mean', 0.5), std=kwargs.get('std', 0.5)),
         ])
     elif transform_type == 'face':
         transform = thv.transforms.Compose([
             thv.transforms.ToTensor(),
-            thv.transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+            thv.transforms.Normalize(mean=kwargs.get('mean', 0.5), std=kwargs.get('std', 0.5)),
         ])
-    elif transform_type == 'bicubic':
+    elif transform_type == 'bicubic_norm':
         transform = thv.transforms.Compose([
-            util_sisr.Bicubic(1/sf),
+            util_sisr.Bicubic(scale=kwargs.get('scale', None), out_shape=kwargs.get('out_shape', None)),
+            util_image.Clamper(min_max=kwargs.get('min_max', (0.0, 1.0))),
             thv.transforms.ToTensor(),
-            thv.transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+            thv.transforms.Normalize(mean=kwargs.get('mean', 0.5), std=kwargs.get('std', 0.5)),
+        ])
+    elif transform_type == 'bicubic_back_norm':
+        transform = thv.transforms.Compose([
+            util_sisr.Bicubic(scale=kwargs.get('scale', None)),
+            util_sisr.Bicubic(scale=1/kwargs.get('scale', None)),
+            util_image.Clamper(min_max=kwargs.get('min_max', (0.0, 1.0))),
+            thv.transforms.ToTensor(),
+            thv.transforms.Normalize(mean=kwargs.get('mean', 0.5), std=kwargs.get('std', 0.5)),
+        ])
+    elif transform_type == 'aug_crop_norm':
+        transform = thv.transforms.Compose([
+            util_image.SpatialAug(),
+            thv.transforms.ToTensor(),
+            thv.transforms.RandomCrop(
+                crop_size=kwargs.get('crop_size', None),
+                pad_if_needed=True,
+                padding_mode='reflect',
+                ),
+            thv.transforms.Normalize(mean=kwargs.get('mean', 0.5), std=kwargs.get('std', 0.5)),
         ])
     else:
         raise ValueError(f'Unexpected transform_variant {transform_variant}')
@@ -48,6 +75,8 @@ def create_dataset(dataset_config):
         dataset = BaseDataFolder(**dataset_config['params'])
     elif dataset_config['type'] == 'realesrgan':
         dataset = RealESRGANDataset(dataset_config['params'])
+    elif dataset_config['type'] == 'inpainting':
+        dataset = InpaintingDataSet(**dataset_config['params'])
     else:
         raise NotImplementedError(dataset_config['type'])
 
@@ -108,9 +137,9 @@ class DatasetBicubic(Dataset):
     def __getitem__(self, index):
         im_path = self.files_names[index]
         im_gt = util_image.imread(im_path, chn='rgb', dtype='float32')
-        im_lq = resize(im_gt, scale_factors=1/self.sf)
+        im_lq = util_image.imresize_np(im_gt, scale=1/self.sf)
         if self.up_back:
-            im_lq = resize(im_lq, scale_factors=self.sf)
+            im_lq = util_image.imresize_np(im_lq, scale=self.sf)
 
         im_lq = rearrange(im_lq, 'h w c -> c h w')
         im_lq = torch.from_numpy(im_lq).type(torch.float32)
@@ -127,45 +156,112 @@ class BaseDataFolder(Dataset):
     def __init__(
             self,
             dir_path,
-            dir_path_gt,
-            need_gt_path=True,
+            transform_type,
+            transform_kwargs=None,
+            dir_path_extra=None,
             length=None,
-            ext=['png', 'jpg', 'jpeg', 'JPEG', 'bmp'],
-            mean=0.5,
-            std=0.5,
+            need_path=False,
+            im_exts=['png', 'jpg', 'jpeg', 'JPEG', 'bmp'],
+            recursive=False,
             ):
         super(BaseDataFolder, self).__init__()
-        if isinstance(ext, str):
-            files_path = [str(x) for x in Path(dir_path).glob(f'*.{ext}')]
-        else:
-            assert isinstance(ext, list) or isinstance(ext, tuple)
-            files_path = []
-            for current_ext in ext:
-                files_path.extend([str(x) for x in Path(dir_path).glob(f'*.{current_ext}')])
-        self.files_path = files_path if length is None else files_path[:length]
-        self.dir_path_gt = dir_path_gt
-        self.need_gt_path = need_gt_path
-        self.mean=mean
-        self.std=std
+
+        file_paths_all = util_common.scan_files_from_folder(dir_path, im_exts, recursive)
+        self.file_paths = file_paths_all if length is None else random.sample(file_paths_all, length)
+        self.file_paths_all = file_paths_all
+
+        self.length = length
+        self.need_path = need_path
+        self.dir_path_extra = dir_path_extra
+        self.transform = get_transforms(transform_type, transform_kwargs)
 
     def __len__(self):
-        return len(self.files_path)
+        return len(self.file_paths)
 
     def __getitem__(self, index):
-        im_path = self.files_path[index]
+        im_path = self.file_paths[index]
         im = util_image.imread(im_path, chn='rgb', dtype='float32')
-        im = util_image.normalize_np(im, mean=self.mean, std=self.std, reverse=False)
-        im = rearrange(im, 'h w c -> c h w')
-        out_dict = {'image':im.astype(np.float32), 'lq':im.astype(np.float32)}
+        im = self.transform(im)
+        out_dict = {'image':im, 'lq':im}
 
-        if self.need_gt_path:
+        if self.dir_path_extra is not None:
+            im_path_extra = Path(self.dir_path_extra) / Path(im_path).name
+            im_extra = util_image.imread(im_path_extra, chn='rgb', dtype='float32')
+            im_extra = self.transform(im_extra)
+            out_dict['gt'] = im_extra
+
+        if self.need_path:
             out_dict['path'] = im_path
 
-        if self.dir_path_gt is not None:
-            gt_path = str(Path(self.dir_path_gt) / Path(im_path).name)
-            im_gt = util_image.imread(gt_path, chn='rgb', dtype='float32')
-            im_gt = util_image.normalize_np(im_gt, mean=self.mean, std=self.std, reverse=False)
-            im_gt = rearrange(im_gt, 'h w c -> c h w')
-            out_dict['gt'] = im_gt.astype(np.float32)
+        return out_dict
+
+    def reset_dataset(self):
+        self.file_paths = random.sample(self.file_paths_all, self.length)
+
+class BaseDataTxt(BaseDataFolder):
+    def __init__(
+            self,
+            txt_path,
+            transform_type,
+            transform_kwargs=None,
+            dir_path_extra=None,
+            length=None,
+            need_path=False,
+            ):
+
+        file_paths_all = util_common.readline_txt(txt_path)
+        self.file_paths = file_paths_all if length is None else random.sample(file_paths_all, length)
+        self.file_paths_all = file_paths_all
+
+        self.length = length
+        self.need_path = need_path
+        self.dir_path_extra = dir_path_extra
+        self.transform = get_transforms(transform_type, transform_kwargs)
+
+class InpaintingDataSet(Dataset):
+    def __init__(
+            self,
+            dir_path,
+            transform_type,
+            transform_kwargs,
+            mask_kwargs,
+            length=None,
+            need_path=False,
+            im_exts=['png', 'jpg', 'jpeg', 'JPEG', 'bmp'],
+            recursive=False,
+            ):
+        super().__init__()
+
+        file_paths_all = util_common.scan_files_from_folder(dir_path, im_exts, recursive)
+        self.file_paths = file_paths_all if length is None else random.sample(file_paths_all, length)
+        self.file_paths_all = file_paths_all
+
+        self.length = length
+        self.need_path = need_path
+        self.transform = get_transforms(transform_type, transform_kwargs)
+        self.mask_generator = MixedMaskGenerator(**mask_kwargs)
+        self.iter_i = 0
+
+    def __len__(self):
+        return len(self.file_paths)
+
+    def __getitem__(self, index):
+        im_path = self.file_paths[index]
+        im = util_image.imread(im_path, chn='rgb', dtype='float32')
+        im = self.transform(im)        # c x h x w
+        out_dict = {'gt':im, }
+
+        mask = self.mask_generator(im, iter_i=self.iter_i)   # c x h x w
+        self.iter_i += 1
+        im_masked = im *  (1 - mask)
+        out_dict['lq'] = im_masked
+        out_dict['mask'] = mask
+
+        if self.need_path:
+            out_dict['path'] = im_path
 
         return out_dict
+
+    def reset_dataset(self):
+        self.file_paths = random.sample(self.file_paths_all, self.length)
+

@@ -39,7 +39,7 @@ model:
 
 model_ir:
   target: models.swinir.SwinIR
-  ckpt_path: ./weights/SwinIR/General_Face_ffhq512.pth
+  ckpt_path: ./weights/estimator/swinir_restoration512_L1.pth
   params:
     img_size: 64
     patch_size: 1

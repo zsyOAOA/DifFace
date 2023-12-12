@@ -11,7 +11,6 @@ import numpy as np
 from scipy import fft
 from pathlib import Path
 from einops import rearrange
-from torchvision.utils import make_grid
 from skimage import img_as_ubyte, img_as_float32
 
 # --------------------------Metrics----------------------------
@@ -273,11 +272,8 @@ def tensor2img(tensor, rgb2bgr=True, out_type=np.uint8, min_max=(0, 1)):
         result = result[0]
     return result
 
-def img2tensor(imgs, out_type=torch.float32):
+def img2tensor(imgs, bgr2rgb=False, out_type=torch.float32):
     """Convert image numpy arrays into torch tensor.
-
-    After clamping to [min, max], values will be normalized to [0, 1].
-
     Args:
         imgs (Array or list[array]): Accept shapes:
             3) list of numpy arrays
@@ -286,13 +282,15 @@ def img2tensor(imgs, out_type=torch.float32):
             Tensor channel should be in RGB order.
 
     Returns:
-        (array or list): 3D ndarray of shape (H x W x C) or 2D ndarray of shape (H x W).
+        (array or list): 4D ndarray of shape (1 x C x H x W)
     """
 
     def _img2tensor(img):
         if img.ndim == 2:
             tensor = torch.from_numpy(img[None, None,]).type(out_type)
         elif img.ndim == 3:
+            if bgr2rgb:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             tensor = torch.from_numpy(rearrange(img, 'h w c -> c h w')).type(out_type).unsqueeze(0)
         else:
             raise TypeError(f'2D or 3D numpy array expected, got{img.ndim}D array')
@@ -301,15 +299,234 @@ def img2tensor(imgs, out_type=torch.float32):
     if not (isinstance(imgs, np.ndarray) or (isinstance(imgs, list) and all(isinstance(t, np.ndarray) for t in imgs))):
         raise TypeError(f'Numpy array or list of numpy array expected, got {type(imgs)}')
 
-    if isinstance(imgs, np.ndarray):
+    flag_numpy = isinstance(imgs, np.ndarray)
+    if flag_numpy:
         imgs = [imgs,]
     result = []
     for _img in imgs:
         result.append(_img2tensor(_img))
 
-    if len(result) == 1 and isinstance(imgs, np.ndarray):
+    if len(result) == 1 and flag_numpy:
         result = result[0]
     return result
+
+# ------------------------Image color------------------------------
+def rgb2gray_th(img):
+    '''
+    Input:
+        img: b x c x h x w, torch tensor
+    '''
+    assert img.dim == 4 or img.shape[1] == 3
+    if img.shape[1] == 3:
+        coef = torch.tensor([0.2989, 0.5870, 0.1140], dtype=img.dtype, device=img.device).view(1,3,1,1)
+        out = torch.sum(img * coef, dim=1, keepdim=True)
+    else:
+        out = img
+    return out
+
+# ------------------------Image resize-----------------------------
+def imresize_np(img, scale, antialiasing=True):
+    # Now the scale should be the same for H and W
+    # input: img: Numpy, HWC or HW [0,1]
+    # output: HWC or HW [0,1] w/o round
+    img = torch.from_numpy(img)
+    need_squeeze = True if img.dim() == 2 else False
+    if need_squeeze:
+        img.unsqueeze_(2)
+
+    in_H, in_W, in_C = img.size()
+    out_C, out_H, out_W = in_C, math.ceil(in_H * scale), math.ceil(in_W * scale)
+    kernel_width = 4
+    kernel = 'cubic'
+
+    # Return the desired dimension order for performing the resize.  The
+    # strategy is to perform the resize first along the dimension with the
+    # smallest scale factor.
+    # Now we do not support this.
+
+    # get weights and indices
+    weights_H, indices_H, sym_len_Hs, sym_len_He = calculate_weights_indices(
+        in_H, out_H, scale, kernel, kernel_width, antialiasing)
+    weights_W, indices_W, sym_len_Ws, sym_len_We = calculate_weights_indices(
+        in_W, out_W, scale, kernel, kernel_width, antialiasing)
+    # process H dimension
+    # symmetric copying
+    img_aug = torch.FloatTensor(in_H + sym_len_Hs + sym_len_He, in_W, in_C)
+    img_aug.narrow(0, sym_len_Hs, in_H).copy_(img)
+
+    sym_patch = img[:sym_len_Hs, :, :]
+    inv_idx = torch.arange(sym_patch.size(0) - 1, -1, -1).long()
+    sym_patch_inv = sym_patch.index_select(0, inv_idx)
+    img_aug.narrow(0, 0, sym_len_Hs).copy_(sym_patch_inv)
+
+    sym_patch = img[-sym_len_He:, :, :]
+    inv_idx = torch.arange(sym_patch.size(0) - 1, -1, -1).long()
+    sym_patch_inv = sym_patch.index_select(0, inv_idx)
+    img_aug.narrow(0, sym_len_Hs + in_H, sym_len_He).copy_(sym_patch_inv)
+
+    out_1 = torch.FloatTensor(out_H, in_W, in_C)
+    kernel_width = weights_H.size(1)
+    for i in range(out_H):
+        idx = int(indices_H[i][0])
+        for j in range(out_C):
+            out_1[i, :, j] = img_aug[idx:idx + kernel_width, :, j].transpose(0, 1).mv(weights_H[i])
+
+    # process W dimension
+    # symmetric copying
+    out_1_aug = torch.FloatTensor(out_H, in_W + sym_len_Ws + sym_len_We, in_C)
+    out_1_aug.narrow(1, sym_len_Ws, in_W).copy_(out_1)
+
+    sym_patch = out_1[:, :sym_len_Ws, :]
+    inv_idx = torch.arange(sym_patch.size(1) - 1, -1, -1).long()
+    sym_patch_inv = sym_patch.index_select(1, inv_idx)
+    out_1_aug.narrow(1, 0, sym_len_Ws).copy_(sym_patch_inv)
+
+    sym_patch = out_1[:, -sym_len_We:, :]
+    inv_idx = torch.arange(sym_patch.size(1) - 1, -1, -1).long()
+    sym_patch_inv = sym_patch.index_select(1, inv_idx)
+    out_1_aug.narrow(1, sym_len_Ws + in_W, sym_len_We).copy_(sym_patch_inv)
+
+    out_2 = torch.FloatTensor(out_H, out_W, in_C)
+    kernel_width = weights_W.size(1)
+    for i in range(out_W):
+        idx = int(indices_W[i][0])
+        for j in range(out_C):
+            out_2[:, i, j] = out_1_aug[:, idx:idx + kernel_width, j].mv(weights_W[i])
+    if need_squeeze:
+        out_2.squeeze_()
+
+    return out_2.numpy()
+
+def imresize(img, scale, antialiasing=True):
+    # Now the scale should be the same for H and W
+    # input: img: pytorch tensor, CHW or HW [0,1]
+    # output: CHW or HW [0,1] w/o round
+    need_squeeze = True if img.dim() == 2 else False
+    if need_squeeze:
+        img.unsqueeze_(0)
+    in_C, in_H, in_W = img.size()
+    out_C, out_H, out_W = in_C, math.ceil(in_H * scale), math.ceil(in_W * scale)
+    kernel_width = 4
+    kernel = 'cubic'
+
+    # Return the desired dimension order for performing the resize.  The
+    # strategy is to perform the resize first along the dimension with the
+    # smallest scale factor.
+    # Now we do not support this.
+
+    # get weights and indices
+    weights_H, indices_H, sym_len_Hs, sym_len_He = calculate_weights_indices(
+        in_H, out_H, scale, kernel, kernel_width, antialiasing)
+    weights_W, indices_W, sym_len_Ws, sym_len_We = calculate_weights_indices(
+        in_W, out_W, scale, kernel, kernel_width, antialiasing)
+    # process H dimension
+    # symmetric copying
+    img_aug = torch.FloatTensor(in_C, in_H + sym_len_Hs + sym_len_He, in_W)
+    img_aug.narrow(1, sym_len_Hs, in_H).copy_(img)
+
+    sym_patch = img[:, :sym_len_Hs, :]
+    inv_idx = torch.arange(sym_patch.size(1) - 1, -1, -1).long()
+    sym_patch_inv = sym_patch.index_select(1, inv_idx)
+    img_aug.narrow(1, 0, sym_len_Hs).copy_(sym_patch_inv)
+
+    sym_patch = img[:, -sym_len_He:, :]
+    inv_idx = torch.arange(sym_patch.size(1) - 1, -1, -1).long()
+    sym_patch_inv = sym_patch.index_select(1, inv_idx)
+    img_aug.narrow(1, sym_len_Hs + in_H, sym_len_He).copy_(sym_patch_inv)
+
+    out_1 = torch.FloatTensor(in_C, out_H, in_W)
+    kernel_width = weights_H.size(1)
+    for i in range(out_H):
+        idx = int(indices_H[i][0])
+        for j in range(out_C):
+            out_1[j, i, :] = img_aug[j, idx:idx + kernel_width, :].transpose(0, 1).mv(weights_H[i])
+
+    # process W dimension
+    # symmetric copying
+    out_1_aug = torch.FloatTensor(in_C, out_H, in_W + sym_len_Ws + sym_len_We)
+    out_1_aug.narrow(2, sym_len_Ws, in_W).copy_(out_1)
+
+    sym_patch = out_1[:, :, :sym_len_Ws]
+    inv_idx = torch.arange(sym_patch.size(2) - 1, -1, -1).long()
+    sym_patch_inv = sym_patch.index_select(2, inv_idx)
+    out_1_aug.narrow(2, 0, sym_len_Ws).copy_(sym_patch_inv)
+
+    sym_patch = out_1[:, :, -sym_len_We:]
+    inv_idx = torch.arange(sym_patch.size(2) - 1, -1, -1).long()
+    sym_patch_inv = sym_patch.index_select(2, inv_idx)
+    out_1_aug.narrow(2, sym_len_Ws + in_W, sym_len_We).copy_(sym_patch_inv)
+
+    out_2 = torch.FloatTensor(in_C, out_H, out_W)
+    kernel_width = weights_W.size(1)
+    for i in range(out_W):
+        idx = int(indices_W[i][0])
+        for j in range(out_C):
+            out_2[j, :, i] = out_1_aug[j, :, idx:idx + kernel_width].mv(weights_W[i])
+    if need_squeeze:
+        out_2.squeeze_()
+    return out_2
+
+def calculate_weights_indices(in_length, out_length, scale, kernel, kernel_width, antialiasing):
+    if (scale < 1) and (antialiasing):
+        # Use a modified kernel to simultaneously interpolate and antialias- larger kernel width
+        kernel_width = kernel_width / scale
+
+    # Output-space coordinates
+    x = torch.linspace(1, out_length, out_length)
+
+    # Input-space coordinates. Calculate the inverse mapping such that 0.5
+    # in output space maps to 0.5 in input space, and 0.5+scale in output
+    # space maps to 1.5 in input space.
+    u = x / scale + 0.5 * (1 - 1 / scale)
+
+    # What is the left-most pixel that can be involved in the computation?
+    left = torch.floor(u - kernel_width / 2)
+
+    # What is the maximum number of pixels that can be involved in the
+    # computation?  Note: it's OK to use an extra pixel here; if the
+    # corresponding weights are all zero, it will be eliminated at the end
+    # of this function.
+    P = math.ceil(kernel_width) + 2
+
+    # The indices of the input pixels involved in computing the k-th output
+    # pixel are in row k of the indices matrix.
+    indices = left.view(out_length, 1).expand(out_length, P) + torch.linspace(0, P - 1, P).view(
+        1, P).expand(out_length, P)
+
+    # The weights used to compute the k-th output pixel are in row k of the
+    # weights matrix.
+    distance_to_center = u.view(out_length, 1).expand(out_length, P) - indices
+    # apply cubic kernel
+    if (scale < 1) and (antialiasing):
+        weights = scale * cubic(distance_to_center * scale)
+    else:
+        weights = cubic(distance_to_center)
+    # Normalize the weights matrix so that each row sums to 1.
+    weights_sum = torch.sum(weights, 1).view(out_length, 1)
+    weights = weights / weights_sum.expand(out_length, P)
+
+    # If a column in weights is all zero, get rid of it. only consider the first and last column.
+    weights_zero_tmp = torch.sum((weights == 0), 0)
+    if not math.isclose(weights_zero_tmp[0], 0, rel_tol=1e-6):
+        indices = indices.narrow(1, 1, P - 2)
+        weights = weights.narrow(1, 1, P - 2)
+    if not math.isclose(weights_zero_tmp[-1], 0, rel_tol=1e-6):
+        indices = indices.narrow(1, 0, P - 2)
+        weights = weights.narrow(1, 0, P - 2)
+    weights = weights.contiguous()
+    indices = indices.contiguous()
+    sym_len_s = -indices.min() + 1
+    sym_len_e = indices.max() - in_length
+    indices = indices + sym_len_s - 1
+    return weights, indices, int(sym_len_s), int(sym_len_e)
+
+# matlab 'imresize' function, now only support 'bicubic'
+def cubic(x):
+    absx = torch.abs(x)
+    absx2 = absx**2
+    absx3 = absx**3
+    return (1.5*absx3 - 2.5*absx2 + 1) * ((absx <= 1).type_as(absx)) + \
+        (-0.5*absx3 + 2.5*absx2 - 4*absx + 2) * (((absx > 1)*(absx <= 2)).type_as(absx))
 
 # ------------------------Image I/O-----------------------------
 def imread(path, chn='rgb', dtype='float32'):
@@ -320,13 +537,16 @@ def imread(path, chn='rgb', dtype='float32'):
         im: h x w x c, numpy tensor
     '''
     im = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)  # BGR, uint8
-    if chn.lower() == 'rgb':
-        if im.ndim == 3:
-            im = bgr2rgb(im)
-        else:
-            im = np.stack((im, im, im), axis=2)
-    elif chn.lower() == 'gray':
-        assert im.ndim == 2
+    try:
+        if chn.lower() == 'rgb':
+            if im.ndim == 3:
+                im = bgr2rgb(im)
+            else:
+                im = np.stack((im, im, im), axis=2)
+        elif chn.lower() == 'gray':
+            assert im.ndim == 2
+    except:
+        print(str(path))
 
     if dtype == 'float32':
         im = im.astype(np.float32) / 255.
@@ -336,9 +556,6 @@ def imread(path, chn='rgb', dtype='float32'):
         pass
     else:
         sys.exit('Please input corrected dtype: float32, float64 or uint8!')
-
-    if im.shape[2] > 3:
-        im = im[:, :, :3]
 
     return im
 
@@ -488,6 +705,29 @@ def imshow(x, title=None, cbar=False):
         plt.colorbar()
     plt.show()
 
+def imblend_with_mask(im, mask, alpha=0.25):
+    """
+    Input:
+        im, mask: h x w x c numpy array, uint8, [0, 255]
+        alpha: scaler in [0.0, 1.0]
+    """
+    edge_map = cv2.Canny(mask, 100, 200).astype(np.float32)[:, :, None] / 255.
+
+    assert mask.dtype == np.uint8
+    mask = mask.astype(np.float32) / 255.
+    if mask.ndim == 2:
+        mask = mask[:, :, None]
+
+    back_color = np.array([159, 121, 238], dtype=np.float32).reshape((1,1,3))
+    blend = im.astype(np.float32) * alpha + (1 - alpha) * back_color
+    blend = np.clip(blend, 0, 255)
+    out = im.astype(np.float32) * (1 - mask) + blend * mask
+
+    # paste edge
+    out = out * (1 - edge_map) + np.array([0,255,0], dtype=np.float32).reshape((1,1,3)) * edge_map
+
+    return out.astype(np.uint8)
+
 # -----------------------Covolution------------------------------
 def imgrad(im, pading_mode='mirror'):
     '''
@@ -586,59 +826,19 @@ def psf2otf(psf, shape):
 
     return otf
 
-def zero_pad(image, shape, position='corner'):
-    """
-    Extends image to a certain size with zeros
-    Input:
-        image: real 2d numpy array
-        shape: tuple of int, desired output shape of the image
-        position : str, 'corner' or 'center',
-                The position of the input image in the output one:
-                * 'corner'
-                    top-left corner (default)
-                * 'center'
-                    centered
-    Output
-        padded_img: real numpy array
-    """
-    shape = np.asarray(shape, dtype=int)
-    imshape = np.asarray(image.shape, dtype=int)
-
-    if np.alltrue(imshape == shape):
-        return image
-
-    if np.any(shape <= 0):
-        raise ValueError("ZERO_PAD: null or negative shape given")
-
-    dshape = shape - imshape
-    if np.any(dshape < 0):
-        raise ValueError("ZERO_PAD: target size smaller than source one")
-
-    pad_img = np.zeros(shape, dtype=image.dtype)
-
-    idx, idy = np.indices(imshape)
-
-    if position == 'center':
-        if np.any(dshape % 2 != 0):
-            raise ValueError("ZERO_PAD: source and target shapes have different parity.")
-        offx, offy = dshape // 2
-    else:
-        offx, offy = (0, 0)
-
-    pad_img[idx + offx, idy + offy] = image
-
-    return pad_img
-
 # ----------------------Patch Cropping----------------------------
 def random_crop(im, pch_size):
     '''
     Randomly crop a patch from the give image.
     '''
     h, w = im.shape[:2]
-    assert h > pch_size and w > pch_size
-    ind_h = random.randint(0, h-pch_size)
-    ind_w = random.randint(0, w-pch_size)
-    im_pch = im[ind_h:ind_h+pch_size, ind_w:ind_w+pch_size,]
+    if h == pch_size and w == pch_size:
+        im_pch = im
+    else:
+        assert h >= pch_size or w >= pch_size
+        ind_h = random.randint(0, h-pch_size)
+        ind_w = random.randint(0, w-pch_size)
+        im_pch = im[ind_h:ind_h+pch_size, ind_w:ind_w+pch_size,]
 
     return im_pch
 
@@ -727,32 +927,46 @@ class ImageSpliterNp:
         return self.im_res / self.pixel_count
 
 class ImageSpliterTh:
-    def __init__(self, im, pch_size, stride, sf=1):
+    def __init__(self, im, pch_size, stride, sf=1, extra_bs=1):
         '''
         Input:
             im: n x c x h x w, torch tensor, float, low-resolution image in SR
             pch_size, stride: patch setting
             sf: scale factor in image super-resolution
+            pch_bs: aggregate pchs to processing, only used when inputing single image
         '''
         assert stride <= pch_size
         self.stride = stride
         self.pch_size = pch_size
         self.sf = sf
+        self.extra_bs = extra_bs
 
         bs, chn, height, width= im.shape
+        self.true_bs = bs
+
         self.height_starts_list = self.extract_starts(height)
         self.width_starts_list = self.extract_starts(width)
+        self.starts_list = []
+        for ii in self.height_starts_list:
+            for jj in self.width_starts_list:
+                self.starts_list.append([ii, jj])
+
         self.length = self.__len__()
-        self.num_pchs = 0
+        self.count_pchs = 0
 
         self.im_ori = im
         self.im_res = torch.zeros([bs, chn, height*sf, width*sf], dtype=im.dtype, device=im.device)
         self.pixel_count = torch.zeros([bs, chn, height*sf, width*sf], dtype=im.dtype, device=im.device)
 
     def extract_starts(self, length):
-        starts = list(range(0, length, self.stride))
-        if starts[-1] + self.pch_size > length:
-            starts[-1] = length - self.pch_size
+        if length <= self.pch_size:
+            starts = [0,]
+        else:
+            starts = list(range(0, length, self.stride))
+            for ii in range(len(starts)):
+                if starts[ii] + self.pch_size > length:
+                    starts[ii] = length - self.pch_size
+            starts = sorted(set(starts), key=starts.index)
         return starts
 
     def __len__(self):
@@ -762,43 +976,60 @@ class ImageSpliterTh:
         return self
 
     def __next__(self):
-        if self.num_pchs < self.length:
-            w_start_idx = self.num_pchs // len(self.height_starts_list)
-            w_start = self.width_starts_list[w_start_idx] * self.sf
-            w_end = w_start + self.pch_size * self.sf
+        if self.count_pchs < self.length:
+            index_infos = []
+            current_starts_list = self.starts_list[self.count_pchs:self.count_pchs+self.extra_bs]
+            for ii, (h_start, w_start) in enumerate(current_starts_list):
+                w_end = w_start + self.pch_size
+                h_end = h_start + self.pch_size
+                current_pch = self.im_ori[:, :, h_start:h_end, w_start:w_end]
+                if ii == 0:
+                    pch =  current_pch
+                else:
+                    pch = torch.cat([pch, current_pch], dim=0)
 
-            h_start_idx = self.num_pchs % len(self.height_starts_list)
-            h_start = self.height_starts_list[h_start_idx] * self.sf
-            h_end = h_start + self.pch_size * self.sf
+                h_start *= self.sf
+                h_end *= self.sf
+                w_start *= self.sf
+                w_end *= self.sf
+                index_infos.append([h_start, h_end, w_start, w_end])
 
-            pch = self.im_ori[:, :, h_start:h_end, w_start:w_end,]
-            self.w_start, self.w_end = w_start, w_end
-            self.h_start, self.h_end = h_start, h_end
-
-            self.num_pchs += 1
+            self.count_pchs += len(current_starts_list)
         else:
             raise StopIteration()
 
-        return pch, (h_start, h_end, w_start, w_end)
+        return pch, index_infos
 
     def update(self, pch_res, index_infos):
         '''
         Input:
-            pch_res: n x c x pch_size x pch_size, float
-            index_infos: (h_start, h_end, w_start, w_end)
+            pch_res: (n*extra_bs) x c x pch_size x pch_size, float
+            index_infos: [(h_start, h_end, w_start, w_end),]
         '''
-        if index_infos is None:
-            w_start, w_end = self.w_start, self.w_end
-            h_start, h_end = self.h_start, self.h_end
-        else:
-            h_start, h_end, w_start, w_end = index_infos
-
-        self.im_res[:, :, h_start:h_end, w_start:w_end] += pch_res
-        self.pixel_count[:, :, h_start:h_end, w_start:w_end] += 1
+        assert pch_res.shape[0] % self.true_bs == 0
+        pch_list = torch.split(pch_res, self.true_bs, dim=0)
+        assert len(pch_list) == len(index_infos)
+        for ii, (h_start, h_end, w_start, w_end) in enumerate(index_infos):
+            current_pch = pch_list[ii]
+            self.im_res[:, :, h_start:h_end, w_start:w_end] +=  current_pch
+            self.pixel_count[:, :, h_start:h_end, w_start:w_end] += 1
 
     def gather(self):
         assert torch.all(self.pixel_count != 0)
         return self.im_res.div(self.pixel_count)
+
+# ----------------------Patch Cropping----------------------------
+class Clamper:
+    def __init__(self, min_max=(-1, 1)):
+        self.min_bound, self.max_bound = min_max[0], min_max[1]
+
+    def __call__(self, im):
+        if isinstance(im, np.ndarray):
+            return np.clip(im, a_min=self.min_bound, a_max=self.max_bound)
+        elif isinstance(im, torch.Tensor):
+            return torch.clamp(im, min=self.min_bound, max=self.max_bound)
+        else:
+            raise TypeError(f'ndarray or Tensor expected, got {type(im)}')
 
 if __name__ == '__main__':
     im = np.random.randn(64, 64, 3).astype(np.float32)

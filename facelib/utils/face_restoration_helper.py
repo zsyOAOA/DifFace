@@ -57,6 +57,7 @@ class FaceRestoreHelper(object):
                  template_3points=False,
                  pad_blur=False,
                  use_parse=False,
+                 use_fp16=False,
                  device=None):
         self.template_3points = template_3points  # improve robustness
         self.upscale_factor = upscale_factor
@@ -102,7 +103,7 @@ class FaceRestoreHelper(object):
             self.device = device
 
         # init face detection model
-        self.face_det = init_detection_model(det_model, half=False, device=self.device)
+        self.face_det = init_detection_model(det_model, half=use_fp16, device=self.device)
 
         # init face parsing model
         self.use_parse = use_parse
