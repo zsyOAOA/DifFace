@@ -243,7 +243,7 @@ class GaussianDiffusion:
         model,
         x,
         t,
-        y0,
+        y0=None,
         clip_denoised=True,
         denoised_fn=None,
         model_kwargs=None,

@@ -20,22 +20,6 @@ model:
     unshuffle: True
     unshuffle_scale: 8
 
-train:
-  lr: 5e-5
-  lr_min: 5e-6
-  batch: [32, 16]   # batchsize for training and validation
-  microbatch: 8
-  num_workers: 32
-  prefetch_factor: 2
-  iterations: 300000
-  weight_decay: 0
-  save_freq: 10000
-  val_freq: ${train.save_freq}
-  log_freq: [100, 2000, 10]
-  loss_type: L1
-  tf_logging: True
-  local_logging: True
-
 data:
   train:
     type: gfpgan 
@@ -76,3 +60,20 @@ data:
       length: 500
       need_path: False
       recursive: False
+
+train:
+  lr: 5e-5
+  lr_min: 5e-6
+  batch: [32, 16]   # batchsize for training and validation
+  microbatch: 8
+  num_workers: 4
+  prefetch_factor: 2
+  iterations: 300000
+  weight_decay: 0
+  save_freq: 10000
+  val_freq: ${train.save_freq}
+  log_freq: [100, 2000, 10]
+  loss_type: L1
+  tf_logging: True
+  local_logging: True
+

@@ -29,11 +29,6 @@ def get_transforms(transform_type, kwargs):
             thv.transforms.ToTensor(),
             thv.transforms.Normalize(mean=kwargs.get('mean', 0.5), std=kwargs.get('std', 0.5)),
         ])
-    elif transform_type == 'face':
-        transform = thv.transforms.Compose([
-            thv.transforms.ToTensor(),
-            thv.transforms.Normalize(mean=kwargs.get('mean', 0.5), std=kwargs.get('std', 0.5)),
-        ])
     elif transform_type == 'bicubic_norm':
         transform = thv.transforms.Compose([
             util_sisr.Bicubic(scale=kwargs.get('scale', None), out_shape=kwargs.get('out_shape', None)),
@@ -67,8 +62,6 @@ def get_transforms(transform_type, kwargs):
 def create_dataset(dataset_config):
     if dataset_config['type'] == 'gfpgan':
         dataset = FFHQDegradationDataset(dataset_config['params'])
-    elif dataset_config['type'] == 'face':
-        dataset = BaseDatasetFace(**dataset_config['params'])
     elif dataset_config['type'] == 'bicubic':
         dataset = DatasetBicubic(**dataset_config['params'])
     elif dataset_config['type'] == 'folder':
@@ -81,32 +74,6 @@ def create_dataset(dataset_config):
         raise NotImplementedError(dataset_config['type'])
 
     return dataset
-
-class BaseDatasetFace(Dataset):
-    def __init__(self, celeba_txt=None,
-                       ffhq_txt=None,
-                       out_size=256,
-                       transform_type='face',
-                       sf=None,
-                       length=None):
-        super().__init__()
-        self.files_names = util_common.readline_txt(celeba_txt) + util_common.readline_txt(ffhq_txt)
-
-        if length is None:
-            self.length = len(self.files_names)
-        else:
-            self.length = length
-
-        self.transform = get_transforms(transform_type, out_size, sf)
-
-    def __len__(self):
-        return self.length
-
-    def __getitem__(self, index):
-        im_path = self.files_names[index]
-        im = util_image.imread(im_path, chn='rgb', dtype='uint8')
-        im = self.transform(im)
-        return {'image':im,}
 
 class DatasetBicubic(Dataset):
     def __init__(self,

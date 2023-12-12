@@ -41,34 +41,52 @@ conda activate DifFace
 ## Inference
 #### :boy: Face image restoration (cropped and aligned)
 ```
-python inference_difface.py --aligned --in_path [image folder/image path] --out_path [result folder] --gpu_id [gpu index]
+python inference_difface.py -i [image folder/image path] -o [result folder] --task restoration --eta 0.5 --aligned --use_fp16
 ```
-#### :couple: Whole image enhancement
+Note that the hyper-parameter eta controls the fidelity-realness trade-off, you can freely adjust it between 0.0 and 1.0. 
+#### :cop: Whole image enhancement
 ```
-python inference_difface.py --in_path [image folder/image path] --out_path [result folder] --gpu_id [gpu index]
+python inference_difface.py -i [image folder/image path] -o [result folder] --task restoration --eta 0.5 --use_fp16
+```
+#### :princess: Face image inpainting
+```
+python inference_difface.py -i [image folder/image path] -o [result folder] --task inpainting --use_fp16
+```
+We assume that the masked area is filled with zeros in the low quality image. Based on such an assumption, the image mask is automatically deteced in our code.
+
+## Testing
+To reproduce the results in our paper, please follow the following guidelines to prepare the testing data.
+1. Download the [FFHQ](https://github.com/NVlabs/ffhq-dataset) dataset, and resize them into size 512x512(or 256x256).
+```
+python scripts/big2small_face.py -i [Face folder(1024x1024)] -o [Saving folder(512x512)] --pch_size 512 
+```
+2. Make the testing dataset for restoration
+```
+python scripts/prepare_testing_restoration.py -i [CelebA folder(512x512)] -o [Saving folder]  
+```
+3. Make the testing dataset for inpainting
+```
+python scripts/prepare_testing_inpainting.py -i [CelebA folder(256x256)] -o [Saving folder]  
 ```
 
 ## Training
-#### :turtle: Prepare data
-1. Download the [FFHQ](https://github.com/NVlabs/ffhq-dataset) dataset, and resize them into size 512x512.
+#### :turtle: Configuration
+
+1. Modify the data path in data.train and data.val according to your own settings. 
+2. Adjust the batch size based on your GPU devices.
+    * train.batchsize: [A, B]    # A denotes the batch size for training,  B denotes the batch size for validation
+    * train.microbatch: C        # C denotes the batch size on each GPU, A = C * num_gpus * num_grad_accumulation
+#### :dolphin: Train diffusion model with 8 GPUS
 ```
-python datapipe/prepare/face/big2small_face.py --face_dir [Face folder(1024x1024)] --save_dir [Saving folder] --pch_size 512 
+torchrun --standalone --nproc_per_node=8 --nnodes=1 main.py --cfg_path configs/training/diffsuion_ffhq512.yaml --save_dir [Logging Folder]  
 ```
-2. Extract the image path into 'datapipe/files_txt/ffhq512.txt'
+#### :whale: Train diffused estimator for restoration (SwinIR) with 4 GPUS
 ```
-python datapipe/prepare/face/split_train_val.py --face_dir [Face folder(512x512)] --save_dir [Saving folder] 
+torchrun --standalone --nproc_per_node=4 --nnodes=1 main.py --cfg_path configs/training/swinir_ffhq512.yaml --save_dir [Logging Folder]  
 ```
-3. Making the testing dataset
+#### :sheep: Train diffused estimator for restoration (LaMa) with 4 GPUS
 ```
-python datapipe/prepare/face/make_testing_data.py --files_txt datapipe/files_txt/ffhq512.txt --save_dir [Saving folder]  
-```
-#### :dolphin: Train diffusion model
-```
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 --nnodes=1 main_diffusion.py --cfg_path configs/training/diffsuion_ffhq512.yaml --save_dir [Logging Folder]  
-```
-#### :whale: Train diffused estimator (SwinIR)
-```
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 --nnodes=1 main_sr.py --cfg_path configs/training/swinir_ffhq512.yaml --save_dir [Logging Folder]  
+torchrun --standalone --nproc_per_node=4 --nnodes=1 main.py --cfg_path configs/training/estimator_lama_inpainting.yaml --save_dir [Logging Folder]  
 ```
 
 ## License
