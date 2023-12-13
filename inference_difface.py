@@ -129,7 +129,7 @@ def main():
     else:
         raise ValueError("Only accept task types of 'restoration' and 'inpainting'!")
 
-    if configs.aligned and args.bs != 1:
+    if not configs.aligned and args.bs != 1:
         args.bs = 1
         print("Resetting batchsize to be 1 for unaligned case.")
 
