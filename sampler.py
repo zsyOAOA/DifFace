@@ -513,6 +513,7 @@ class DifFaceSampler(BaseSampler):
         if self.rank == 0:
             print(f'Please enjoy the results in {str(out_path)}...', flush=True)
 
+@torch.enable_grad()
 def masking_regularizer(y0, x0, cond_kwargs):
     '''
     Input:
