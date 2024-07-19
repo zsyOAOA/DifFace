@@ -1,4 +1,4 @@
-# DifFace: Blind Face Restoration with Diffused Error Contraction
+# DifFace: Blind Face Restoration with Diffused Error Contraction (TPAMI, 2024)
 
 [Zongsheng Yue](https://zsyoaoa.github.io/), [Chen Change Loy](https://www.mmlab-ntu.com/person/ccloy/) 
 
