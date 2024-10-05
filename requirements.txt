@@ -1,0 +1,12 @@
+numpy==1.23.5
+scipy==1.14.1
+timm==1.0.9
+kornia==0.7.3
+scikit-image==0.24.0
+opencv-python
+einops
+gdown
+matplotlib
+omegaconf
+tqdm
+loguru
