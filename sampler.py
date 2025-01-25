@@ -204,7 +204,7 @@ class DifFaceSampler(BaseSampler):
         h_old, w_old = y0.shape[2:4]
         if not (h_old == self.configs.im_size and w_old == self.configs.im_size):
             y0 = F.interpolate(y0, size=(self.configs.im_size,)*2, mode='bicubic', antialias=True)
-            if 'mask' in cond_kwargs:
+            if (cond_kwargs is not None) and ('mask' in cond_kwargs):
                 cond_kwargs['mask'] = detect_mask(y0, thres=0)
 
         if need_restoration:
